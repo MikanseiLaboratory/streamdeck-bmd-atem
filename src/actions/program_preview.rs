@@ -69,6 +69,31 @@ pub async fn handle_key_down_program_preview(
             &log_tx,
             format!("ATEM action failed (uuid={}, me={}): {}", action, me, e),
         );
+    } else {
+        // After successfully executing the action, query the latest ATEM state
+        // and immediately refresh key tallies for this switcher so that the
+        // Stream Deck reflects the new Program/Preview buses without waiting
+        // for the next async state update event.
+        let state_guard = controller.get_state().await;
+        let state: &AtemState = &*state_guard;
+        update_program_preview_key_images_from_state(
+            &ip,
+            state,
+            &key_registry,
+            &image_tx,
+            &log_tx,
+            true,
+        )
+        .await;
+        update_program_preview_key_images_from_state(
+            &ip,
+            state,
+            &key_registry,
+            &image_tx,
+            &log_tx,
+            false,
+        )
+        .await;
     }
 
     Ok(())

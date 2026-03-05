@@ -392,7 +392,7 @@ async fn handle_message(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
             if let Some(ip) = ip_str {
-                if let Err(e) = get_or_connect_atem(
+                match get_or_connect_atem(
                     Arc::clone(&atem_cache),
                     &ip,
                     Arc::clone(&pi_tx),
@@ -403,10 +403,36 @@ async fn handle_message(
                 )
                 .await
                 {
-                    log_warn(
-                        &log_tx,
-                        format!("WillAppear: failed to connect ATEM at {}: {}", ip, e),
-                    );
+                    Ok(controller) => {
+                        // Immediately sync Program/Preview tallies for this ATEM so that
+                        // keys show the correct colour as soon as they appear.
+                        let state_guard = controller.get_state().await;
+                        let state: &AtemState = &*state_guard;
+                        actions::program_preview::update_program_preview_key_images_from_state(
+                            &ip,
+                            state,
+                            &key_registry,
+                            &image_tx,
+                            &log_tx,
+                            true,
+                        )
+                        .await;
+                        actions::program_preview::update_program_preview_key_images_from_state(
+                            &ip,
+                            state,
+                            &key_registry,
+                            &image_tx,
+                            &log_tx,
+                            false,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        log_warn(
+                            &log_tx,
+                            format!("WillAppear: failed to connect ATEM at {}: {}", ip, e),
+                        );
+                    }
                 }
             }
         }
