@@ -467,6 +467,7 @@ async fn handle_message(
                     // M/E list - use actual ATEM topology when possible.
                     "atem_me_options" => {
                         let mut items = Vec::new();
+                        let mut connected = false;
 
                         if let Some(entry) = key_registry.read().await.get(context) {
                             let ip = entry
@@ -478,6 +479,7 @@ async fn handle_message(
 
                             if let Some(ip) = ip {
                                 if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    connected = true;
                                     let state_guard = controller.get_state().await;
                                     let state: &AtemState = &*state_guard;
                                     let me_count = state.get_program_sources().len();
@@ -513,11 +515,23 @@ async fn handle_message(
                             context: context.clone(),
                             payload: response_payload,
                         });
+
+                        // Also send best-effort ATEM connection state for this context.
+                        let status_payload = serde_json::json!({
+                            "event": "atem_state",
+                            "connected": connected,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: status_payload,
+                        });
                     }
 
                     // Video input list - use actual ATEM input_properties when possible.
                     "atem_video_sources" => {
                         let mut items = Vec::new();
+                        let mut connected = false;
 
                         if let Some(entry) = key_registry.read().await.get(context) {
                             let ip = entry
@@ -529,6 +543,7 @@ async fn handle_message(
 
                             if let Some(ip) = ip {
                                 if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    connected = true;
                                     let state_guard = controller.get_state().await;
                                     let state: &AtemState = &*state_guard;
 
@@ -578,6 +593,17 @@ async fn handle_message(
                             action: action.clone(),
                             context: context.clone(),
                             payload: response_payload,
+                        });
+
+                        // Also send best-effort ATEM connection state for this context.
+                        let status_payload = serde_json::json!({
+                            "event": "atem_state",
+                            "connected": connected,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: status_payload,
                         });
                     }
 
@@ -710,6 +736,26 @@ async fn forward_atem_state_to_pi(
             &log_tx,
         )
         .await;
+    }
+
+    // If we exit the update loop, treat this as a disconnect and notify PIs.
+    log_info(
+        &log_tx,
+        format!("ATEM state update channel closed for ip={}", ip),
+    );
+    let contexts = pi_subscriptions.read().await.contexts_for_ip(&ip);
+    if !contexts.is_empty() {
+        let payload = serde_json::json!({
+            "event": "atem_state",
+            "connected": false,
+        });
+        for (action, context) in contexts {
+            let _ = pi_tx.send(SendToPIRequest {
+                action,
+                context,
+                payload: payload.clone(),
+            });
+        }
     }
 }
 
