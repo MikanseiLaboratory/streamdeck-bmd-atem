@@ -167,18 +167,22 @@ pub(crate) fn log_warn(log_tx: &Arc<mpsc::UnboundedSender<LogRequest>>, msg: imp
     });
 }
 
-// 1x1 solid-color PNGs encoded as base64 (small and efficient).
-const RED_PNG_BASE64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
-const GREEN_PNG_BASE64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=";
-
 pub(crate) fn red_image_data_url() -> String {
-    format!("data:image/png;base64,{}", RED_PNG_BASE64)
+    // Use the plugin-bundled red key image.
+    // Path is relative to the .sdPlugin root.
+    "Images/red.png".to_string()
 }
 
 pub(crate) fn green_image_data_url() -> String {
-    format!("data:image/png;base64,{}", GREEN_PNG_BASE64)
+    // Use the plugin-bundled green key image.
+    // Path is relative to the .sdPlugin root.
+    "Images/green.png".to_string()
+}
+
+pub(crate) fn gray_image_data_url() -> String {
+    // Use the plugin-bundled gray key image for "off" state.
+    // Path is relative to the .sdPlugin root.
+    "Images/gray.png".to_string()
 }
 
 #[tokio::main]
@@ -725,17 +729,35 @@ async fn forward_atem_state_to_pi(
             continue;
         }
 
-        // Query the authoritative state from the controller.
+        // Query the authoritative state from the controller once per update.
         let state_guard = controller.get_state().await;
         let state: &AtemState = &*state_guard;
-        actions::program_preview::update_program_preview_key_images_from_state(
-            &ip,
-            state,
-            &key_registry,
-            &image_tx,
-            &log_tx,
-        )
-        .await;
+
+        // When program changes, update Program keys only.
+        if updated.intersects(StateUpdate::PROGRAM_SOURCE) {
+            actions::program_preview::update_program_preview_key_images_from_state(
+                &ip,
+                state,
+                &key_registry,
+                &image_tx,
+                &log_tx,
+                true,
+            )
+            .await;
+        }
+
+        // When preview changes, update Preview keys only.
+        if updated.intersects(StateUpdate::PREVIEW_SOURCE) {
+            actions::program_preview::update_program_preview_key_images_from_state(
+                &ip,
+                state,
+                &key_registry,
+                &image_tx,
+                &log_tx,
+                false,
+            )
+            .await;
+        }
     }
 
     // If we exit the update loop, treat this as a disconnect and notify PIs.

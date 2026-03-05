@@ -1,7 +1,7 @@
 {
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "SDKVersion": 3,
-  "Author": "streamdeck-atem-rs",
+  "Author": "未完成成果物研究所",
   "CodePath": "streamdeck-atem",
   "CodePathMac": "streamdeck-atem",
   "CodePathWin": "streamdeck-atem.exe",

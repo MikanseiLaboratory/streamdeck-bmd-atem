@@ -5,9 +5,9 @@ use necromancer::{protocol::structs::VideoSource, AtemController, AtemState};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::{
-    de_u16_from_str_or_num, de_u8_from_str_or_num, get_or_connect_atem, green_image_data_url,
-    red_image_data_url, video_source_from_id, KeyConfig, LogRequest, PiSubscriptions,
-    SendToPIRequest, SetImageRequest,
+    de_u16_from_str_or_num, de_u8_from_str_or_num, get_or_connect_atem, gray_image_data_url,
+    green_image_data_url, red_image_data_url, video_source_from_id, KeyConfig, LogRequest,
+    PiSubscriptions, SendToPIRequest, SetImageRequest,
 };
 
 /// Per-action settings for PROGRAM/PREVIEW INPUT actions.
@@ -82,6 +82,7 @@ pub async fn update_program_preview_key_images_from_state(
     key_registry: &Arc<RwLock<HashMap<String, KeyConfig>>>,
     image_tx: &Arc<mpsc::UnboundedSender<SetImageRequest>>,
     log_tx: &Arc<mpsc::UnboundedSender<LogRequest>>,
+    is_program_update: bool,
 ) {
     // Snapshot the keys we care about (Program/Preview actions for this ATEM IP).
     let keys: Vec<(String, String, u8, u16)> = {
@@ -89,19 +90,28 @@ pub async fn update_program_preview_key_images_from_state(
         let collected: Vec<_> = guard
             .values()
             .filter_map(|k| {
-                if k.action != "dev.miseinul.atem.programinput"
-                    && k.action != "dev.miseinul.atem.previewinput"
-                {
+                let is_program_action = k.action == "dev.miseinul.atem.programinput";
+                let is_preview_action = k.action == "dev.miseinul.atem.previewinput";
+
+                // Filter by action type: when only program changed, we don't
+                // touch preview keys, and vice versa.
+                if is_program_update && !is_program_action {
+                    return None;
+                }
+                if !is_program_update && !is_preview_action {
                     return None;
                 }
 
                 let settings: ProgramPreviewSettings =
                     serde_json::from_value(k.settings.clone()).unwrap_or_default();
 
+                // Compare ATEM IPs in a trimmed form so that minor
+                // formatting differences (e.g. trailing spaces) do not
+                // prevent us from matching keys to a controller.
                 let ip_match = settings
                     .atem_ip
-                    .as_deref()
-                    .map(|ip| ip == ip_str)
+                    .as_ref()
+                    .map(|ip| ip.trim() == ip_str)
                     .unwrap_or(false);
 
                 if !ip_match {
@@ -156,19 +166,20 @@ pub async fn update_program_preview_key_images_from_state(
             ),
         );
 
+        // Colour rules:
+        // - Program keys: active = red, inactive = gray.
+        // - Preview keys: active = green, inactive = gray.
         let image = if is_program {
-            // Program bus: active is red, inactive is green.
             if is_active {
                 Some(red_image_data_url())
             } else {
-                Some(green_image_data_url())
+                Some(gray_image_data_url())
             }
         } else {
-            // Preview bus: active is green, inactive is red.
             if is_active {
                 Some(green_image_data_url())
             } else {
-                Some(red_image_data_url())
+                Some(gray_image_data_url())
             }
         };
 
