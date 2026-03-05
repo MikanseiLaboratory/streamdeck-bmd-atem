@@ -463,69 +463,125 @@ async fn handle_message(
             );
             // Handle SDPI Components DataSource requests for M/E and video source lists.
             if let Some(event_name) = payload.get("event").and_then(|v| v.as_str()) {
-                let items = match event_name {
-                    // Simple, generic list of common M/E indices (0–3) used across ATEM models.
+                match event_name {
+                    // M/E list - use actual ATEM topology when possible.
                     "atem_me_options" => {
-                        (0u8..=3)
-                            .map(|me| {
-                                serde_json::json!({
-                                    "label": format!("M/E {}", me),
-                                    "value": me.to_string(),
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    // Generic list of numbered inputs; values are numeric IDs used by the plugin today.
-                    "atem_video_sources" => {
-                        (1u16..=20)
-                            .map(|id| {
-                                serde_json::json!({
-                                    "label": format!("Input {}", id),
-                                    "value": id.to_string(),
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    _ => Vec::new(),
-                };
+                        let mut items = Vec::new();
 
-                if !items.is_empty() {
-                    let response_payload = serde_json::json!({
-                        "event": event_name,
-                        "items": items,
-                    });
-                    let _ = pi_tx.send(SendToPIRequest {
-                        action: action.clone(),
-                        context: context.clone(),
-                        payload: response_payload,
-                    });
+                        if let Some(entry) = key_registry.read().await.get(context) {
+                            let ip = entry
+                                .settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
 
-                    // Also use this DataSource round-trip as a chance to push the current
-                    // ATEM connection status to the Property Inspector.
-                    //
-                    // We look up the key's stored settings by context to find the configured
-                    // ATEM IP, then check whether we already have a controller cached.
-                    if let Some(entry) = key_registry.read().await.get(context) {
-                        let ip = entry
-                            .settings
-                            .get("atem_ip")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
+                            if let Some(ip) = ip {
+                                if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    let state_guard = controller.get_state().await;
+                                    let state: &AtemState = &*state_guard;
+                                    let me_count = state.get_program_sources().len();
 
-                        if let Some(ip) = ip {
-                            let connected = atem_cache.read().await.contains_key(&ip);
-                            let status_payload = serde_json::json!({
-                                "event": "atem_state",
-                                "connected": connected,
-                            });
-                            let _ = pi_tx.send(SendToPIRequest {
-                                action: action.clone(),
-                                context: context.clone(),
-                                payload: status_payload,
-                            });
+                                    for me in 0u8..(me_count as u8) {
+                                        items.push(serde_json::json!({
+                                            "label": format!("M/E {}", me),
+                                            "value": me.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
                         }
+
+                        // Fallback for when we don't have ATEM state yet.
+                        if items.is_empty() {
+                            items = (0u8..=3)
+                                .map(|me| {
+                                    serde_json::json!({
+                                        "label": format!("M/E {}", me),
+                                        "value": me.to_string(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                        }
+
+                        let response_payload = serde_json::json!({
+                            "event": event_name,
+                            "items": items,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: response_payload,
+                        });
                     }
+
+                    // Video input list - use actual ATEM input_properties when possible.
+                    "atem_video_sources" => {
+                        let mut items = Vec::new();
+
+                        if let Some(entry) = key_registry.read().await.get(context) {
+                            let ip = entry
+                                .settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+
+                            if let Some(ip) = ip {
+                                if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    let state_guard = controller.get_state().await;
+                                    let state: &AtemState = &*state_guard;
+
+                                    let mut ids: Vec<u16> = state
+                                        .input_properties
+                                        .keys()
+                                        .filter_map(|src| {
+                                            let id = *src as u16;
+                                            if (1..=40).contains(&id) {
+                                                Some(id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+
+                                    ids.sort_unstable();
+                                    ids.dedup();
+
+                                    for id in ids {
+                                        items.push(serde_json::json!({
+                                            "label": format!("Input {}", id),
+                                            "value": id.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback for when we don't have ATEM state yet.
+                        if items.is_empty() {
+                            items = (1u16..=20)
+                                .map(|id| {
+                                    serde_json::json!({
+                                        "label": format!("Input {}", id),
+                                        "value": id.to_string(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                        }
+
+                        let response_payload = serde_json::json!({
+                            "event": event_name,
+                            "items": items,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: response_payload,
+                        });
+                    }
+
+                    _ => {}
                 }
             }
         }
@@ -590,6 +646,7 @@ async fn get_or_connect_atem(
         pi_subscriptions,
         key_registry,
         image_tx,
+        log_tx,
     ));
     Ok(controller)
 }
@@ -602,27 +659,43 @@ async fn forward_atem_state_to_pi(
     pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
     key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
     image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
+    log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
 ) {
     let mut state_rx = controller.state_update_events();
     while let Ok((_txn, updated)) = state_rx.recv().await {
+        log_info(
+            &log_tx,
+            format!(
+                "ATEM state update received for ip={} flags={:?}",
+                ip, updated
+            ),
+        );
         let contexts = pi_subscriptions.read().await.contexts_for_ip(&ip);
         if contexts.is_empty() {
-            continue;
-        }
-        let payload = serde_json::json!({
-            "event": "atem_state",
-            "connected": true,
-        });
-        for (action, context) in contexts {
-            let _ = pi_tx.send(SendToPIRequest {
-                action,
-                context,
-                payload: payload.clone(),
+            log_info(
+                &log_tx,
+                format!("ATEM state update ip={} but no PI contexts subscribed", ip),
+            );
+        } else {
+            let payload = serde_json::json!({
+                "event": "atem_state",
+                "connected": true,
             });
+            for (action, context) in contexts {
+                let _ = pi_tx.send(SendToPIRequest {
+                    action,
+                    context,
+                    payload: payload.clone(),
+                });
+            }
         }
 
         // Only touch key images when ATEM actually reports program/preview changes.
         if !updated.intersects(StateUpdate::PREVIEW_OR_PROGRAM_SOURCE) {
+            log_info(
+                &log_tx,
+                "ATEM state update did not include PREVIEW_OR_PROGRAM_SOURCE; skipping key image update",
+            );
             continue;
         }
 
@@ -634,6 +707,7 @@ async fn forward_atem_state_to_pi(
             state,
             &key_registry,
             &image_tx,
+            &log_tx,
         )
         .await;
     }

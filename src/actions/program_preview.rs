@@ -81,11 +81,12 @@ pub async fn update_program_preview_key_images_from_state(
     state: &AtemState,
     key_registry: &Arc<RwLock<HashMap<String, KeyConfig>>>,
     image_tx: &Arc<mpsc::UnboundedSender<SetImageRequest>>,
+    log_tx: &Arc<mpsc::UnboundedSender<LogRequest>>,
 ) {
     // Snapshot the keys we care about (Program/Preview actions for this ATEM IP).
     let keys: Vec<(String, String, u8, u16)> = {
         let guard = key_registry.read().await;
-        guard
+        let collected: Vec<_> = guard
             .values()
             .filter_map(|k| {
                 if k.action != "dev.miseinul.atem.programinput"
@@ -114,7 +115,18 @@ pub async fn update_program_preview_key_images_from_state(
                     settings.video_source.unwrap_or(0),
                 ))
             })
-            .collect()
+            .collect();
+
+        crate::log_info(
+            log_tx,
+            format!(
+                "update_program_preview_key_images_from_state: ip={} keys_for_ip={}",
+                ip_str,
+                collected.len()
+            ),
+        );
+
+        collected
     };
 
     for (ctx, action_uuid, me, configured_source_id) in keys {
@@ -129,6 +141,20 @@ pub async fn update_program_preview_key_images_from_state(
         let is_active = current_source_opt
             .map(|current| current == configured_source)
             .unwrap_or(false);
+
+        crate::log_info(
+            log_tx,
+            format!(
+                "update_program_preview_key_images_from_state: ctx={} action={} me={} configured_source_id={} current_source={:?} is_program={} is_active={}",
+                ctx,
+                action_uuid,
+                me,
+                configured_source_id,
+                current_source_opt,
+                is_program,
+                is_active
+            ),
+        );
 
         let image = if is_program {
             // Program bus: active is red, inactive is green.
