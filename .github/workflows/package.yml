@@ -38,7 +38,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Install Stream Deck CLI
         run: npm install -g @elgato/cli@latest
@@ -81,7 +80,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Install Stream Deck CLI
         run: npm install -g @elgato/cli@latest
