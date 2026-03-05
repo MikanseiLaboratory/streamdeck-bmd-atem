@@ -7,3 +7,5 @@ target/
 
 dev.miseinul.atem.sdPlugin/streamdeck-atem
 dev.miseinul.atem.sdPlugin/streamdeck-atem.exe
+
+dist/dev.miseinul.atem.streamDeckPlugin
