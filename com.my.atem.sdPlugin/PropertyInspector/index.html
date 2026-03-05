@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ATEM Action</title>
+  <script src="sdpi-components.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 12px; margin: 0; }
+    .status { margin-top: 12px; padding: 8px; border-radius: 4px; font-size: 12px; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <sdpi-item label="ATEM IP address">
+    <sdpi-textfield id="atem-ip" setting="atem_ip" placeholder="192.168.1.100"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Action type">
+    <sdpi-select id="action-type" setting="action_type">
+      <option value="cut">Cut</option>
+      <option value="auto">Auto</option>
+      <option value="program_input">Program input</option>
+      <option value="preview_input">Preview input</option>
+      <option value="cut_black">Cut to black</option>
+      <option value="fade_to_black">Fade to black</option>
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="ME (Mix Effect) index">
+    <sdpi-textfield id="me" setting="me" value="0"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Video source (for program/preview)">
+    <sdpi-textfield
+      id="video-source"
+      setting="video_source"
+      value="1"
+      placeholder="e.g. 1 = Input 1">
+    </sdpi-textfield>
+  </sdpi-item>
+
+  <div id="status" class="status disconnected">Not connected</div>
+
+  <script>
+    let websocket = null;
+    let actionInfo = {};
+    let uuid = null;
+    let registerEvent = null;
+
+    function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+      uuid = inUUID;
+      registerEvent = inRegisterEvent;
+      actionInfo = JSON.parse(inActionInfo || '{}');
+      const info = JSON.parse(inInfo || '{}');
+
+      const url = 'ws://127.0.0.1:' + inPort;
+      websocket = new WebSocket(url);
+
+      websocket.onopen = function() {
+        const register = { event: registerEvent, uuid: uuid };
+        websocket.send(JSON.stringify(register));
+        const payload = actionInfo.payload?.settings || {};
+        document.getElementById('atem-ip').value = payload.atem_ip || '';
+        document.getElementById('action-type').value = payload.action_type || 'cut';
+        document.getElementById('me').value = payload.me !== undefined ? payload.me : 0;
+        document.getElementById('video-source').value = payload.video_source !== undefined ? payload.video_source : 1;
+      };
+
+      websocket.onmessage = function(evt) {
+        const msg = JSON.parse(evt.data);
+        if (msg.event === 'didReceiveSettings') {
+          const s = msg.payload?.settings || {};
+          document.getElementById('atem-ip').value = s.atem_ip || '';
+          document.getElementById('action-type').value = s.action_type || 'cut';
+          document.getElementById('me').value = s.me !== undefined ? s.me : 0;
+          document.getElementById('video-source').value = s.video_source !== undefined ? s.video_source : 1;
+        }
+        const payload = msg.payload?.payload || msg.payload;
+        if (payload && payload.event === 'atem_state') {
+          const el = document.getElementById('status');
+          el.textContent = payload.connected ? 'Connected to ATEM' : 'Disconnected';
+          el.className = 'status ' + (payload.connected ? 'connected' : 'disconnected');
+        }
+      };
+
+      websocket.onclose = function() {
+        document.getElementById('status').textContent = 'Disconnected';
+        document.getElementById('status').className = 'status disconnected';
+      };
+    }
+
+    function setSettings() {
+      if (websocket && websocket.readyState === WebSocket.OPEN) {
+        const payload = {
+          atem_ip: document.getElementById('atem-ip').value.trim() || undefined,
+          action_type: document.getElementById('action-type').value || undefined,
+          me: parseInt(document.getElementById('me').value, 10) || 0,
+          video_source: parseInt(document.getElementById('video-source').value, 10) || 0
+        };
+        websocket.send(JSON.stringify({
+          event: 'setSettings',
+          context: uuid,
+          payload: payload
+        }));
+      }
+    }
+
+    document.getElementById('atem-ip').addEventListener('change', setSettings);
+    document.getElementById('atem-ip').addEventListener('blur', setSettings);
+    document.getElementById('action-type').addEventListener('change', setSettings);
+    document.getElementById('me').addEventListener('change', setSettings);
+    document.getElementById('video-source').addEventListener('change', setSettings);
+  </script>
+</body>
+</html>

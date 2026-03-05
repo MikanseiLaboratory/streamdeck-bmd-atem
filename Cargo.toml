@@ -1,0 +1,17 @@
+[package]
+name = "streamdeck-atem"
+version = "0.1.0"
+edition = "2021"
+description = "Stream Deck plugin for Blackmagic ATEM control"
+license = "Apache-2.0"
+
+[dependencies]
+streamdeck-rs = "0.7"
+necromancer = { git = "https://github.com/micolous/necromancer" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+num-traits = "0.2"

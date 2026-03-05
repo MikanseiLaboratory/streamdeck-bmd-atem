@@ -1,0 +1,70 @@
+# Package Stream Deck plugin into .streamDeckPlugin per distribution docs:
+# https://docs.elgato.com/streamdeck/sdk/introduction/distribution/
+name: Package Plugin
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  pack:
+    name: Build & Pack (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            binary_name: streamdeck-atem.exe
+          - os: macos-latest
+            binary_name: streamdeck-atem
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.os == 'windows-latest' && 'x86_64-pc-windows-msvc' || 'x86_64-apple-darwin' }}
+
+      - name: Build release binary
+        run: cargo build --release
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Copy binary into plugin directory (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item target\release\streamdeck-atem.exe com.my.atem.sdPlugin\
+
+      - name: Copy binary into plugin directory (macOS)
+        if: runner.os != 'Windows'
+        run: cp target/release/streamdeck-atem com.my.atem.sdPlugin/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Stream Deck CLI
+        run: npm install -g @elgato/cli@latest
+
+      - name: Validate plugin
+        run: streamdeck validate com.my.atem.sdPlugin
+
+      - name: Pack plugin (Windows)
+        if: runner.os == 'Windows'
+        run: New-Item -ItemType Directory -Force -Path dist; streamdeck pack com.my.atem.sdPlugin --output dist --no-update-check -f
+
+      - name: Pack plugin (macOS)
+        if: runner.os != 'Windows'
+        run: mkdir -p dist && streamdeck pack com.my.atem.sdPlugin --output dist --no-update-check -f
+
+      - name: Upload .streamDeckPlugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamdeck-atem-plugin-${{ matrix.os }}
+          path: dist/
