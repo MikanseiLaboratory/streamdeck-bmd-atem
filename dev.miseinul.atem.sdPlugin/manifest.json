@@ -28,17 +28,82 @@
   "Profiles": [],
   "Actions": [
     {
-      "UUID": "dev.miseinul.atem.action",
+      "UUID": "dev.miseinul.atem.cut",
       "Icon": "Images/icon",
-      "Name": "ATEM Action",
-      "PropertyInspectorPath": "PropertyInspector/index.html",
+      "Name": "ATEM Cut",
+      "PropertyInspectorPath": "PropertyInspector/cut.html",
       "States": [
         {
           "Image": "Images/icon",
           "TitleAlignment": "middle"
         }
       ],
-      "Tooltip": "Trigger ATEM cut, auto, program/preview, etc."
+      "Tooltip": "Perform a CUT transition on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.auto",
+      "Icon": "Images/icon",
+      "Name": "ATEM Auto",
+      "PropertyInspectorPath": "PropertyInspector/auto.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Perform an AUTO transition on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.program-input",
+      "Icon": "Images/icon",
+      "Name": "ATEM Program Input",
+      "PropertyInspectorPath": "PropertyInspector/program_input.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Switch the ATEM program bus to the configured input."
+    },
+    {
+      "UUID": "dev.miseinul.atem.preview-input",
+      "Icon": "Images/icon",
+      "Name": "ATEM Preview Input",
+      "PropertyInspectorPath": "PropertyInspector/preview_input.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Switch the ATEM preview bus to the configured input."
+    },
+    {
+      "UUID": "dev.miseinul.atem.cut-black",
+      "Icon": "Images/icon",
+      "Name": "ATEM Cut to Black",
+      "PropertyInspectorPath": "PropertyInspector/cut_black.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Perform a CUT to black on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.fade-to-black",
+      "Icon": "Images/icon",
+      "Name": "ATEM Fade to Black",
+      "PropertyInspectorPath": "PropertyInspector/fade_to_black.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Toggle FADE TO BLACK on the configured ATEM ME."
     }
   ]
 }

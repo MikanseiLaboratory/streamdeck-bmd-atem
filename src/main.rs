@@ -2,12 +2,12 @@
 //! Connects to ATEM switchers via necromancer, caches by IP, and forwards state to Property Inspector.
 
 use futures::{SinkExt, StreamExt};
-use necromancer::{protocol::structs::VideoSource, AtemController};
+use necromancer::{protocol::structs::VideoSource, AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
 use serde::Deserialize;
 use std::{collections::HashMap, env, net::SocketAddrV4, str::FromStr, sync::Arc};
 use streamdeck_rs::registration::RegistrationParams;
-use streamdeck_rs::{LogMessagePayload, Message, MessageOut, StreamDeckSocket};
+use streamdeck_rs::{ImagePayload, LogMessagePayload, Message, MessageOut, StreamDeckSocket, Target};
 use tokio::sync::{mpsc, RwLock};
 use tracing::warn;
 
@@ -16,6 +16,16 @@ use tracing::warn;
 struct GlobalSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     atem_ip: Option<String>,
+}
+
+/// Per-key configuration we track while the plugin is running.
+/// Indexed by Stream Deck context.
+#[derive(Clone, Debug)]
+struct KeyConfig {
+    action: String,
+    context: String,
+    device: Option<String>,
+    settings: ActionSettings,
 }
 
 /// Deserializes JSON number or string into u8 (for PI textfield/range values).
@@ -65,17 +75,25 @@ where
 }
 
 /// Per-action settings (each key instance).
-/// Keys must match PropertyInspector form `setting` attributes: atem_ip, action_type, me, video_source.
+/// Keys must match PropertyInspector form `setting` attributes: atem_ip, me, video_source.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ActionSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     atem_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action_type: Option<String>,
     #[serde(default, deserialize_with = "de_u8_from_str_or_num")]
     me: Option<u8>,
     #[serde(default, deserialize_with = "de_u16_from_str_or_num")]
     video_source: Option<u16>,
+}
+
+/// High-level ATEM action derived from Stream Deck action UUID and settings.
+enum AtemAction {
+    Cut { me: u8 },
+    Auto { me: u8 },
+    ProgramInput { me: u8, source: VideoSource },
+    PreviewInput { me: u8, source: VideoSource },
+    CutBlack { me: u8 },
+    FadeToBlack { me: u8 },
 }
 
 /// Message from Property Inspector to plugin (SendToPlugin payload).
@@ -94,6 +112,12 @@ struct SendToPIRequest {
 /// Request to send a log message to Stream Deck via LogMessage API.
 struct LogRequest {
     message: String,
+}
+
+/// Request to update a key's image via SetImage.
+struct SetImageRequest {
+    context: String,
+    image: Option<String>,
 }
 
 /// Tracks which (action, context) want ATEM state updates for which IP.
@@ -153,6 +177,20 @@ fn log_warn(log_tx: &Arc<mpsc::UnboundedSender<LogRequest>>, msg: impl AsRef<str
     });
 }
 
+// 1x1 solid-color PNGs encoded as base64 (small and efficient).
+const RED_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+const GREEN_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=";
+
+fn red_image_data_url() -> String {
+    format!("data:image/png;base64,{}", RED_PNG_BASE64)
+}
+
+fn green_image_data_url() -> String {
+    format!("data:image/png;base64,{}", GREEN_PNG_BASE64)
+}
+
 #[tokio::main]
 async fn main() {
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<LogRequest>();
@@ -164,27 +202,21 @@ async fn main() {
         format!("launch args ({}): {:?}", args.len(), args),
     );
 
-    let params = match RegistrationParams::from_args(std::env::args()) {
-        Ok(p) => p,
-        Err(e) => {
-            std::process::exit(1);
-        }
-    };
+    let params =
+        RegistrationParams::from_args(std::env::args()).unwrap_or_else(|_| std::process::exit(1));
 
-    log_info(&log_tx, format!("connecting to Stream Deck on port {}", params.port));
-    let mut socket = match StreamDeckSocket::<
-        GlobalSettings,
-        ActionSettings,
-        PIMessageIn,
-        PIMessageOut,
-    >::connect(params.port, params.event.clone(), params.uuid.clone())
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            std::process::exit(1);
-        }
-    };
+    log_info(
+        &log_tx,
+        format!("connecting to Stream Deck on port {}", params.port),
+    );
+    let mut socket =
+        StreamDeckSocket::<GlobalSettings, ActionSettings, PIMessageIn, PIMessageOut>::connect(
+            params.port,
+            params.event.clone(),
+            params.uuid.clone(),
+        )
+        .await
+        .unwrap_or_else(|_| std::process::exit(1));
 
     // Request global settings on startup (expected by Stream Deck after registration)
     let get_ctx = params.uuid.clone();
@@ -196,11 +228,15 @@ async fn main() {
     }
 
     let (pi_tx, mut pi_rx) = mpsc::unbounded_channel::<SendToPIRequest>();
+    let (image_tx, mut image_rx) = mpsc::unbounded_channel::<SetImageRequest>();
 
     let pi_tx = Arc::new(pi_tx);
+    let image_tx = Arc::new(image_tx);
     let atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let pi_subscriptions = Arc::new(RwLock::new(PiSubscriptions::new()));
+    let key_registry: Arc<RwLock<HashMap<String, KeyConfig>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     loop {
         tokio::select! {
@@ -218,6 +254,8 @@ async fn main() {
                     Arc::clone(&atem_cache),
                     Arc::clone(&pi_subscriptions),
                     Arc::clone(&log_tx),
+                    Arc::clone(&key_registry),
+                    Arc::clone(&image_tx),
                 )
                 .await
                 {
@@ -232,6 +270,20 @@ async fn main() {
                 };
                 if let Err(e) = socket.send(out).await {
                     log_warn(&log_tx, format!("send to PI failed: {}", e));
+                }
+            }
+            Some(img_req) = image_rx.recv() => {
+                let payload = ImagePayload {
+                    image: img_req.image,
+                    target: Target::Both,
+                    state: None,
+                };
+                let out = MessageOut::<GlobalSettings, ActionSettings, PIMessageOut>::SetImage {
+                    context: img_req.context,
+                    payload,
+                };
+                if let Err(e) = socket.send(out).await {
+                    log_warn(&log_tx, format!("send SetImage failed: {}", e));
                 }
             }
             Some(log_req) = log_rx.recv() => {
@@ -256,6 +308,8 @@ async fn handle_message(
     atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>>,
     pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
     log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
+    key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match msg {
         Message::KeyDown {
@@ -280,28 +334,25 @@ async fn handle_message(
                 log_warn(&log_tx, "KeyDown: no ATEM IP in action settings");
                 return Ok(());
             };
-            let controller =
-                get_or_connect_atem(
-                    atem_cache.clone(),
-                    ip_str,
-                    pi_tx.clone(),
-                    pi_subscriptions.clone(),
-                    Arc::clone(&log_tx),
-                )
-                .await?;
+            let controller = get_or_connect_atem(
+                atem_cache.clone(),
+                ip_str,
+                pi_tx.clone(),
+                pi_subscriptions.clone(),
+                Arc::clone(&log_tx),
+                Arc::clone(&key_registry),
+                Arc::clone(&image_tx),
+            )
+            .await?;
             let me = settings.me.unwrap_or(0);
-            let action_type = settings
-                .action_type
-                .as_deref()
-                .unwrap_or("cut")
-                .to_lowercase();
             let video_source_id = settings.video_source.unwrap_or(0);
-            if let Err(e) = run_atem_action(&*controller, &action_type, me, video_source_id).await {
+            let atem_action = build_atem_action(action, me, video_source_id);
+            if let Err(e) = atem_action.execute(&*controller).await {
                 log_warn(
                     &log_tx,
                     format!(
-                        "ATEM action failed (action_type={}, me={}, source_id={}): {}",
-                        action_type, me, video_source_id, e
+                        "ATEM action failed (uuid={}, me={}, source_id={}): {}",
+                        action, me, video_source_id, e
                     ),
                 );
             }
@@ -323,12 +374,22 @@ async fn handle_message(
                     action, context, device, payload.settings
                 ),
             );
+            key_registry.write().await.insert(
+                context.clone(),
+                KeyConfig {
+                    action: action.clone(),
+                    context: context.clone(),
+                    device: device.clone(),
+                    settings: payload.settings.clone(),
+                },
+            );
         }
         Message::WillDisappear { action, context, .. } => {
             log_info(
                 &log_tx,
                 format!("WillDisappear action={} context={}", action, context),
             );
+            key_registry.write().await.remove(context);
         }
         Message::DidReceiveSettings {
             action,
@@ -343,6 +404,10 @@ async fn handle_message(
                     action, context, payload.settings
                 ),
             );
+            // Update stored settings for this key (if we are tracking it).
+            if let Some(entry) = key_registry.write().await.get_mut(context) {
+                entry.settings = payload.settings.clone();
+            }
             let ip_str = payload
                 .settings
                 .atem_ip
@@ -436,6 +501,8 @@ async fn get_or_connect_atem(
     pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
     pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
     log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
+    key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
 ) -> Result<Arc<AtemController>, Box<dyn std::error::Error + Send + Sync>> {
     {
         let guard = cache.read().await;
@@ -459,6 +526,8 @@ async fn get_or_connect_atem(
         Arc::clone(&controller),
         pi_tx,
         pi_subscriptions,
+        key_registry,
+        image_tx,
     ));
     Ok(controller)
 }
@@ -469,9 +538,11 @@ async fn forward_atem_state_to_pi(
     controller: Arc<AtemController>,
     pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
     pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
+    key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
 ) {
     let mut state_rx = controller.state_update_events();
-    while let Ok((_txn, _state_update)) = state_rx.recv().await {
+    while let Ok((_txn, updated)) = state_rx.recv().await {
         let contexts = pi_subscriptions.read().await.contexts_for_ip(&ip);
         if contexts.is_empty() {
             continue;
@@ -487,32 +558,127 @@ async fn forward_atem_state_to_pi(
                 payload: payload.clone(),
             });
         }
+
+        // Only touch key images when ATEM actually reports program/preview changes.
+        if !updated.intersects(StateUpdate::PREVIEW_OR_PROGRAM_SOURCE) {
+            continue;
+        }
+
+        // Query the authoritative state from the controller.
+        let state_guard = controller.get_state().await;
+        let state: &AtemState = &*state_guard;
+        update_program_preview_key_images_from_state(&ip, state, &key_registry, &image_tx).await;
     }
 }
 
-/// Execute the requested ATEM action (cut, auto, program_input, preview_input, etc.).
-async fn run_atem_action(
-    controller: &AtemController,
-    action_type: &str,
-    me: u8,
-    video_source_id: u16,
-) -> Result<(), necromancer::Error> {
-    match action_type {
-        "cut" => controller.cut(me).await,
-        "auto" => controller.auto(me).await,
-        "program_input" | "program" => {
-            let source = VideoSource::from_u16(video_source_id).unwrap_or(VideoSource::Unknown);
-            controller.set_program_input(me, source).await
-        }
-        "preview_input" | "preview" => {
-            let source = VideoSource::from_u16(video_source_id).unwrap_or(VideoSource::Unknown);
-            controller.set_preview_input(me, source).await
-        }
-        "cut_black" => controller.cut_black(me, true).await,
-        "fade_to_black" | "ftb" => controller.toggle_auto_black(me).await,
-        _ => {
-            warn!("unknown action_type {:?}, defaulting to cut", action_type);
-            controller.cut(me).await
+/// Update Program/Preview action key images based purely on the ATEM's own state.
+async fn update_program_preview_key_images_from_state(
+    ip_str: &str,
+    state: &AtemState,
+    key_registry: &Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: &Arc<mpsc::UnboundedSender<SetImageRequest>>,
+) {
+    // Snapshot the keys we care about (Program/Preview actions for this ATEM IP).
+    let keys: Vec<(String, String, u8, u16)> = {
+        let guard = key_registry.read().await;
+        guard
+            .values()
+            .filter(|k| {
+                k.settings
+                    .atem_ip
+                    .as_deref()
+                    .map(|ip| ip == ip_str)
+                    .unwrap_or(false)
+                    && (k.action == "dev.miseinul.atem.program-input"
+                        || k.action == "dev.miseinul.atem.preview-input")
+            })
+            .map(|k| {
+                (
+                    k.context.clone(),
+                    k.action.clone(),
+                    k.settings.me.unwrap_or(0),
+                    k.settings.video_source.unwrap_or(0),
+                )
+            })
+            .collect()
+    };
+
+    for (ctx, action_uuid, me, configured_source_id) in keys {
+        let configured_source =
+            VideoSource::from_u16(configured_source_id).unwrap_or(VideoSource::Unknown);
+
+        let (current_source_opt, is_program) = if action_uuid == "dev.miseinul.atem.program-input" {
+            (state.get_program_source(me), true)
+        } else {
+            (state.get_preview_source(me), false)
+        };
+
+        let is_active = current_source_opt
+            .map(|current| current == configured_source)
+            .unwrap_or(false);
+
+        let image = if is_program {
+            // Program bus: active is red, inactive is green.
+            if is_active {
+                Some(red_image_data_url())
+            } else {
+                Some(green_image_data_url())
+            }
+        } else {
+            // Preview bus: active is green, inactive is red.
+            if is_active {
+                Some(green_image_data_url())
+            } else {
+                Some(red_image_data_url())
+            }
+        };
+
+        let _ = image_tx.send(SetImageRequest {
+            context: ctx,
+            image,
+        });
+    }
+}
+
+/// Helper to convert a numeric video source ID into a `VideoSource` enum with a safe default.
+fn video_source_from_id(video_source_id: u16) -> VideoSource {
+    VideoSource::from_u16(video_source_id).unwrap_or(VideoSource::Unknown)
+}
+
+/// Build a high-level ATEM action from Stream Deck action UUID and settings.
+fn build_atem_action(action_uuid: &str, me: u8, video_source_id: u16) -> AtemAction {
+    match action_uuid {
+        "dev.miseinul.atem.cut" => AtemAction::Cut { me },
+        "dev.miseinul.atem.auto" => AtemAction::Auto { me },
+        "dev.miseinul.atem.program-input" => AtemAction::ProgramInput {
+            me,
+            source: video_source_from_id(video_source_id),
+        },
+        "dev.miseinul.atem.preview-input" => AtemAction::PreviewInput {
+            me,
+            source: video_source_from_id(video_source_id),
+        },
+        "dev.miseinul.atem.cut-black" => AtemAction::CutBlack { me },
+        "dev.miseinul.atem.fade-to-black" => AtemAction::FadeToBlack { me },
+        // Fallback to a simple cut for unknown/legacy UUIDs.
+        _ => AtemAction::Cut { me },
+    }
+}
+
+impl AtemAction {
+    /// Execute this high-level ATEM action against the controller.
+    async fn execute(&self, controller: &AtemController) -> Result<(), necromancer::Error> {
+        match *self {
+            AtemAction::Cut { me } => controller.cut(me).await,
+            AtemAction::Auto { me } => controller.auto(me).await,
+            AtemAction::ProgramInput { me, source } => {
+                controller.set_program_input(me, source).await
+            }
+            AtemAction::PreviewInput { me, source } => {
+                controller.set_preview_input(me, source).await
+            }
+            AtemAction::CutBlack { me } => controller.cut_black(me, true).await,
+            AtemAction::FadeToBlack { me } => controller.toggle_auto_black(me).await,
         }
     }
 }

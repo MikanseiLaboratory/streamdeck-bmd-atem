@@ -2,14 +2,13 @@
 <html lang="en-gb">
 <head>
   <meta charset="utf-8" />
-  <title>ATEM Action</title>
+  <title>ATEM Program Input</title>
   <script src="https://sdpi-components.dev/releases/v3/sdpi-components.js"></script>
   <script type="text/javascript">
     if (window.SDPIComponents && SDPIComponents.i18n && SDPIComponents.i18n.locales) {
       SDPIComponents.i18n.locales.en = SDPIComponents.i18n.locales.en || {};
       Object.assign(SDPIComponents.i18n.locales.en, {
         atem_ip_label: 'ATEM IP address',
-        action_type_label: 'Action type',
         me_label: 'ME (Mix Effect) index',
         video_source_label: 'Video source (program/preview)',
         status_label: 'Connection',
@@ -25,21 +24,10 @@
   </style>
 </head>
 <body>
-  <!-- Setting keys must match Rust ActionSettings: atem_ip, action_type, me, video_source -->
+  <!-- Setting keys must match Rust ActionSettings: atem_ip, me, video_source -->
 
   <sdpi-item label="ATEM IP address">
     <sdpi-textfield setting="atem_ip" placeholder="192.168.1.100"></sdpi-textfield>
-  </sdpi-item>
-
-  <sdpi-item label="Action type">
-    <sdpi-select setting="action_type">
-      <option value="cut">Cut</option>
-      <option value="auto">Auto</option>
-      <option value="program_input">Program input</option>
-      <option value="preview_input">Preview input</option>
-      <option value="cut_black">Cut to black</option>
-      <option value="fade_to_black">Fade to black</option>
-    </sdpi-select>
   </sdpi-item>
 
   <sdpi-item label="ME (Mix Effect) index">
@@ -73,3 +61,4 @@
   </script>
 </body>
 </html>
+
