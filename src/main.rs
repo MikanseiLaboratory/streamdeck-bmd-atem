@@ -380,13 +380,75 @@ async fn handle_message(
                     settings: payload.settings.clone(),
                 },
             );
+
+            // Eagerly establish ATEM connection for this key if an IP is already
+            // configured, so that the PI DataSource "connected" state and key
+            // colour updates can reflect the real switcher state before the
+            // first key press.
+            let ip_str = payload
+                .settings
+                .get("atem_ip")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(ip) = ip_str {
+                if let Err(e) = get_or_connect_atem(
+                    Arc::clone(&atem_cache),
+                    &ip,
+                    Arc::clone(&pi_tx),
+                    Arc::clone(&pi_subscriptions),
+                    Arc::clone(&log_tx),
+                    Arc::clone(&key_registry),
+                    Arc::clone(&image_tx),
+                )
+                .await
+                {
+                    log_warn(
+                        &log_tx,
+                        format!("WillAppear: failed to connect ATEM at {}: {}", ip, e),
+                    );
+                }
+            }
         }
         Message::WillDisappear { action, context, .. } => {
             log_info(
                 &log_tx,
                 format!("WillDisappear action={} context={}", action, context),
             );
-            key_registry.write().await.remove(context);
+            // Remove the key from our registry and, if this was the last key
+            // referencing a given ATEM IP, evict that controller from the
+            // cache so DataSource 'connected' reflects reality.
+            let removed = {
+                let mut guard = key_registry.write().await;
+                guard.remove(context)
+            };
+
+            if let Some(entry) = removed {
+                let ip_str = entry
+                    .settings
+                    .get("atem_ip")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+
+                if let Some(ip) = ip_str {
+                    // Check whether any remaining key still references this IP.
+                    let still_used = {
+                        let guard = key_registry.read().await;
+                        guard.values().any(|k| {
+                            k.settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim() == ip)
+                                .unwrap_or(false)
+                        })
+                    };
+
+                    if !still_used {
+                        atem_cache.write().await.remove(&ip);
+                    }
+                }
+            }
         }
         Message::DidReceiveSettings {
             action,
@@ -664,14 +726,17 @@ async fn get_or_connect_atem(
     let controller = AtemController::connect_udp(addr, true).await?;
     let controller = Arc::new(controller);
     let ip_owned = ip_str.to_string();
-    cache
-        .write()
-        .await
-        .insert(ip_owned.clone(), Arc::clone(&controller));
+    {
+        cache
+            .write()
+            .await
+            .insert(ip_owned.clone(), Arc::clone(&controller));
+    }
 
     tokio::spawn(forward_atem_state_to_pi(
         ip_owned,
         Arc::clone(&controller),
+        Arc::clone(&cache),
         pi_tx,
         pi_subscriptions,
         key_registry,
@@ -685,6 +750,7 @@ async fn get_or_connect_atem(
 async fn forward_atem_state_to_pi(
     ip: String,
     controller: Arc<AtemController>,
+    cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>>,
     pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
     pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
     key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
@@ -760,11 +826,16 @@ async fn forward_atem_state_to_pi(
         }
     }
 
-    // If we exit the update loop, treat this as a disconnect and notify PIs.
+    // If we exit the update loop, treat this as a disconnect: evict the
+    // controller from the cache and notify PIs.
     log_info(
         &log_tx,
         format!("ATEM state update channel closed for ip={}", ip),
     );
+    {
+        let mut guard = cache.write().await;
+        guard.remove(&ip);
+    }
     let contexts = pi_subscriptions.read().await.contexts_for_ip(&ip);
     if !contexts.is_empty() {
         let payload = serde_json::json!({
