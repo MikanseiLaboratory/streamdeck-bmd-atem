@@ -1,6 +1,8 @@
 # Package Stream Deck plugin into .streamDeckPlugin per distribution docs:
 # https://docs.elgato.com/streamdeck/sdk/introduction/distribution/
 name: Package Plugin
+permissions:
+  contents: write
 
 on:
   push:
