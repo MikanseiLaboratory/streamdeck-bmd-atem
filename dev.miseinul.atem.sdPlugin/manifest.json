@@ -8,21 +8,35 @@
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
   "Name": "ATEM Control",
-  "Version": "0.1.0",
-  "UUID": "com.my.atem",
+  "Version": "0.1.0.0",
+  "UUID": "dev.miseinul.atem",
   "OS": [
-    { "Platform": "mac", "MinimumVersion": "10.15" },
-    { "Platform": "windows", "MinimumVersion": "10" }
+    {
+      "Platform": "mac",
+      "MinimumVersion": "10.15"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
   ],
-  "Software": { "MinimumVersion": "6.0" },
+  "Software": {
+    "MinimumVersion": "6.9"
+  },
+  "Category": "ATEM Control",
+  "CategoryIcon": "Images/icon",
+  "Profiles": [],
   "Actions": [
     {
-      "UUID": "com.my.atem.action",
+      "UUID": "dev.miseinul.atem.action",
       "Icon": "Images/icon",
       "Name": "ATEM Action",
       "PropertyInspectorPath": "PropertyInspector/index.html",
       "States": [
-        { "Image": "Images/icon", "TitleAlignment": "middle" }
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
       ],
       "Tooltip": "Trigger ATEM cut, auto, program/preview, etc."
     }

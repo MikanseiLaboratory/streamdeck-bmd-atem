@@ -1260,8 +1260,7 @@ dependencies = [
 [[package]]
 name = "streamdeck-rs"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdfd7a0ed0410bfbd735d044dba474a29128af1c955a765deff52e214dc48b0e"
+source = "git+https://github.com/FlowingSPDG/streamdeck-rs?rev=4bdee355f5135a10cfc949d50efb675434cc2919#4bdee355f5135a10cfc949d50efb675434cc2919"
 dependencies = [
  "failure",
  "futures",

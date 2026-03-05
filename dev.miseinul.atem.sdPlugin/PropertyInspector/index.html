@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en-gb">
+<head>
+  <meta charset="utf-8" />
+  <title>ATEM Action</title>
+  <script src="https://sdpi-components.dev/releases/v3/sdpi-components.js"></script>
+  <script type="text/javascript">
+    if (window.SDPIComponents && SDPIComponents.i18n && SDPIComponents.i18n.locales) {
+      SDPIComponents.i18n.locales.en = SDPIComponents.i18n.locales.en || {};
+      Object.assign(SDPIComponents.i18n.locales.en, {
+        atem_ip_label: 'ATEM IP address',
+        action_type_label: 'Action type',
+        me_label: 'ME (Mix Effect) index',
+        video_source_label: 'Video source (program/preview)',
+        status_label: 'Connection',
+        status_connected: 'Connected to ATEM',
+        status_disconnected: 'Not connected'
+      });
+    }
+  </script>
+  <style>
+    .pi-status { margin-top: 12px; padding: 8px; border-radius: 4px; font-size: 12px; }
+    .pi-status.connected { background: #d4edda; color: #155724; }
+    .pi-status.disconnected { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <!-- Setting keys must match Rust ActionSettings: atem_ip, action_type, me, video_source -->
+
+  <sdpi-item label="ATEM IP address">
+    <sdpi-textfield setting="atem_ip" placeholder="192.168.1.100"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Action type">
+    <sdpi-select setting="action_type">
+      <option value="cut">Cut</option>
+      <option value="auto">Auto</option>
+      <option value="program_input">Program input</option>
+      <option value="preview_input">Preview input</option>
+      <option value="cut_black">Cut to black</option>
+      <option value="fade_to_black">Fade to black</option>
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="ME (Mix Effect) index">
+    <sdpi-textfield setting="me" placeholder="0" pattern="[0-9]+"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Video source (for program/preview)">
+    <sdpi-textfield setting="video_source" placeholder="e.g. 1 = Input 1" pattern="[0-9]+"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Connection">
+    <div id="status" class="pi-status disconnected">Not connected</div>
+  </sdpi-item>
+
+  <script>
+    (function () {
+      var statusEl = document.getElementById('status');
+      function updateStatus(connected) {
+        if (!statusEl) return;
+        statusEl.textContent = connected ? 'Connected to ATEM' : 'Not connected';
+        statusEl.className = 'pi-status ' + (connected ? 'connected' : 'disconnected');
+      }
+      if (window.SDPIComponents && SDPIComponents.streamDeckClient) {
+        SDPIComponents.streamDeckClient.sendToPropertyInspector.subscribe(function (event) {
+          var payload = event && event.payload;
+          if (!payload || payload.event !== 'atem_state') return;
+          updateStatus(!!payload.connected);
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

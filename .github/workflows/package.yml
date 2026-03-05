@@ -18,8 +18,9 @@ jobs:
         include:
           - os: windows-latest
             binary_name: streamdeck-atem.exe
-          - os: macos-latest
-            binary_name: streamdeck-atem
+          # Mac: 有効にするときは下のブロックのコメントを外し、上の windows と合わせて matrix に含める
+          # - os: macos-latest
+          #   binary_name: streamdeck-atem
 
     steps:
       - name: Checkout
@@ -37,11 +38,11 @@ jobs:
 
       - name: Copy binary into plugin directory (Windows)
         if: runner.os == 'Windows'
-        run: Copy-Item target\release\streamdeck-atem.exe com.my.atem.sdPlugin\
+        run: Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\
 
       - name: Copy binary into plugin directory (macOS)
         if: runner.os != 'Windows'
-        run: cp target/release/streamdeck-atem com.my.atem.sdPlugin/
+        run: cp target/release/streamdeck-atem dev.miseinul.atem.sdPlugin/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -53,15 +54,15 @@ jobs:
         run: npm install -g @elgato/cli@latest
 
       - name: Validate plugin
-        run: streamdeck validate com.my.atem.sdPlugin
+        run: streamdeck validate dev.miseinul.atem.sdPlugin
 
       - name: Pack plugin (Windows)
         if: runner.os == 'Windows'
-        run: New-Item -ItemType Directory -Force -Path dist; streamdeck pack com.my.atem.sdPlugin --output dist --no-update-check -f
+        run: New-Item -ItemType Directory -Force -Path dist; streamdeck pack dev.miseinul.atem.sdPlugin --output dist --no-update-check -f
 
       - name: Pack plugin (macOS)
         if: runner.os != 'Windows'
-        run: mkdir -p dist && streamdeck pack com.my.atem.sdPlugin --output dist --no-update-check -f
+        run: mkdir -p dist && streamdeck pack dev.miseinul.atem.sdPlugin --output dist --no-update-check -f
 
       - name: Upload .streamDeckPlugin artifact
         uses: actions/upload-artifact@v4

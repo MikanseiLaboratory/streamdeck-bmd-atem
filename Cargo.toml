@@ -6,7 +6,7 @@ description = "Stream Deck plugin for Blackmagic ATEM control"
 license = "Apache-2.0"
 
 [dependencies]
-streamdeck-rs = "0.7"
+streamdeck-rs = { git = "https://github.com/FlowingSPDG/streamdeck-rs", rev = "4bdee355f5135a10cfc949d50efb675434cc2919" }
 necromancer = { git = "https://github.com/micolous/necromancer" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 serde = { version = "1", features = ["derive"] }
