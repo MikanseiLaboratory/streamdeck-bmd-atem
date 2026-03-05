@@ -32,7 +32,9 @@ jobs:
           CARGO_TERM_COLOR: always
 
       - name: Copy binary into plugin directory (Windows)
-        run: Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\
+        run: |
+          Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\streamdeck-atem.exe
+          Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\streamdeck-atem
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
