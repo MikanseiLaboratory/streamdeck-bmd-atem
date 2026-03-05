@@ -499,6 +499,33 @@ async fn handle_message(
                         context: context.clone(),
                         payload: response_payload,
                     });
+
+                    // Also use this DataSource round-trip as a chance to push the current
+                    // ATEM connection status to the Property Inspector.
+                    //
+                    // We look up the key's stored settings by context to find the configured
+                    // ATEM IP, then check whether we already have a controller cached.
+                    if let Some(entry) = key_registry.read().await.get(context) {
+                        let ip = entry
+                            .settings
+                            .get("atem_ip")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty());
+
+                        if let Some(ip) = ip {
+                            let connected = atem_cache.read().await.contains_key(&ip);
+                            let status_payload = serde_json::json!({
+                                "event": "atem_state",
+                                "connected": connected,
+                            });
+                            let _ = pi_tx.send(SendToPIRequest {
+                                action: action.clone(),
+                                context: context.clone(),
+                                payload: status_payload,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -555,6 +582,7 @@ async fn get_or_connect_atem(
         .write()
         .await
         .insert(ip_owned.clone(), Arc::clone(&controller));
+
     tokio::spawn(forward_atem_state_to_pi(
         ip_owned,
         Arc::clone(&controller),
