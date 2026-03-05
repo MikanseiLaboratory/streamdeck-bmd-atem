@@ -1,0 +1,109 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "SDKVersion": 3,
+  "Author": "未完成成果物研究所",
+  "CodePath": "streamdeck-atem",
+  "CodePathMac": "streamdeck-atem",
+  "CodePathWin": "streamdeck-atem.exe",
+  "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
+  "Icon": "Images/icon",
+  "Name": "ATEM Control",
+  "Version": "0.1.0.0",
+  "UUID": "dev.miseinul.atem",
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "10.15"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Software": {
+    "MinimumVersion": "6.9"
+  },
+  "Category": "ATEM Control",
+  "CategoryIcon": "Images/icon",
+  "Profiles": [],
+  "Actions": [
+    {
+      "UUID": "dev.miseinul.atem.cut",
+      "Icon": "Images/icon",
+      "Name": "ATEM Cut",
+      "PropertyInspectorPath": "PropertyInspector/cut.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Perform a CUT transition on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.auto",
+      "Icon": "Images/icon",
+      "Name": "ATEM Auto",
+      "PropertyInspectorPath": "PropertyInspector/auto.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Perform an AUTO transition on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.programinput",
+      "Icon": "Images/icon",
+      "Name": "ATEM Program Input",
+      "PropertyInspectorPath": "PropertyInspector/program_input.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Switch the ATEM program bus to the configured input."
+    },
+    {
+      "UUID": "dev.miseinul.atem.previewinput",
+      "Icon": "Images/icon",
+      "Name": "ATEM Preview Input",
+      "PropertyInspectorPath": "PropertyInspector/preview_input.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Switch the ATEM preview bus to the configured input."
+    },
+    {
+      "UUID": "dev.miseinul.atem.cuttoblack",
+      "Icon": "Images/icon",
+      "Name": "ATEM Cut to Black",
+      "PropertyInspectorPath": "PropertyInspector/cut_black.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Perform a CUT to black on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.fadetoblack",
+      "Icon": "Images/icon",
+      "Name": "ATEM Fade to Black",
+      "PropertyInspectorPath": "PropertyInspector/fade_to_black.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Toggle FADE TO BLACK on the configured ATEM ME."
+    }
+  ]
+}

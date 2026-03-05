@@ -1,0 +1,3 @@
+# Exclude from .streamDeckPlugin package (see distribution docs)
+Images/README.md
+*.md

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en-gb">
+<head>
+  <meta charset="utf-8" />
+  <title>ATEM Preview Input</title>
+  <script src="sdpi-components.js"></script>
+  <script type="text/javascript">
+    if (window.SDPIComponents && SDPIComponents.i18n && SDPIComponents.i18n.locales) {
+      SDPIComponents.i18n.locales.en = SDPIComponents.i18n.locales.en || {};
+      Object.assign(SDPIComponents.i18n.locales.en, {
+        atem_ip_label: 'ATEM IP address',
+        me_label: 'ME (Mix Effect) index',
+        video_source_label: 'Video source (program/preview)',
+        status_label: 'Connection',
+        status_connected: 'Connected to ATEM',
+        status_disconnected: 'Not connected'
+      });
+    }
+  </script>
+  <style>
+    .pi-status { margin-top: 12px; padding: 8px; border-radius: 4px; font-size: 12px; }
+    .pi-status.connected { background: #d4edda; color: #155724; }
+    .pi-status.disconnected { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <!-- Setting keys must match Rust ActionSettings: atem_ip, me, video_source -->
+
+  <sdpi-item label="ATEM IP address">
+    <sdpi-textfield setting="atem_ip" placeholder="192.168.1.100"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="ME (Mix Effect) index">
+    <sdpi-select
+      setting="me"
+      datasource="atem_me_options"
+      loading="Loading M/Es...">
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="Video source (for program/preview)">
+    <sdpi-select
+      setting="video_source"
+      datasource="atem_video_sources"
+      loading="Loading inputs...">
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="Connection">
+    <div id="status" class="pi-status disconnected">Not connected</div>
+  </sdpi-item>
+
+  <script>
+    (function () {
+      var statusEl = document.getElementById('status');
+      function updateStatus(connected) {
+        if (!statusEl) return;
+        statusEl.textContent = connected ? 'Connected to ATEM' : 'Not connected';
+        statusEl.className = 'pi-status ' + (connected ? 'connected' : 'disconnected');
+      }
+      if (window.SDPIComponents && SDPIComponents.streamDeckClient) {
+        SDPIComponents.streamDeckClient.sendToPropertyInspector.subscribe(function (event) {
+          var payload = event && event.payload;
+          if (!payload || payload.event !== 'atem_state') return;
+          updateStatus(!!payload.connected);
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
+
