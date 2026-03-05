@@ -13,122 +13,93 @@ on:
     branches: [main]
 
 jobs:
+  build-backend:
+    name: Build backend binaries (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: backend-windows
+            binary_path: target/x86_64-pc-windows-msvc/release/streamdeck-atem.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: backend-macos
+            binary_path: target/x86_64-apple-darwin/release/streamdeck-atem
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary (${{ matrix.target }})
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload backend binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}
+
   pack:
-    name: Build & Pack (windows-latest)
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Build release binary
-        run: cargo build --release
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Copy binary into plugin directory (Windows)
-        run: |
-          Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\streamdeck-atem.exe
-          Copy-Item target\release\streamdeck-atem.exe dev.miseinul.atem.sdPlugin\streamdeck-atem
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Stream Deck CLI
-        run: npm install -g @elgato/cli@latest
-
-      - name: Validate plugin
-        run: streamdeck validate dev.miseinul.atem.sdPlugin
-
-      - name: Pack plugin (Windows)
-        run: New-Item -ItemType Directory -Force -Path dist; streamdeck pack dev.miseinul.atem.sdPlugin --output dist --no-update-check -f
-
-      - name: Upload .streamDeckPlugin artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: streamdeck-atem-plugin-windows-latest
-          path: dist/
-
-  pack-macos:
-    name: Build & Pack (macos-latest)
-    runs-on: macos-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: Build release binary
-        run: cargo build --release
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Copy binary into plugin directory (macOS)
-        run: cp target/release/streamdeck-atem dev.miseinul.atem.sdPlugin/
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Stream Deck CLI
-        run: npm install -g @elgato/cli@latest
-
-      - name: Validate plugin
-        run: streamdeck validate dev.miseinul.atem.sdPlugin
-
-      - name: Pack plugin (macOS)
-        run: mkdir -p dist && streamdeck pack dev.miseinul.atem.sdPlugin --output dist --no-update-check -f
-
-      - name: Upload .streamDeckPlugin artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: streamdeck-atem-plugin-macos-latest
-          path: dist/
-
-  release:
-    name: Create GitHub Release
+    name: Validate & Pack plugin (both backends)
     runs-on: ubuntu-latest
     needs:
-      - pack
-      - pack-macos
-    if: startsWith(github.ref, 'refs/tags/v')
+      - build-backend
 
     steps:
-      - name: Download Windows artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download backend binaries
         uses: actions/download-artifact@v4
         with:
-          name: streamdeck-atem-plugin-windows-latest
-          path: dist/windows
+          path: backend
 
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: streamdeck-atem-plugin-macos-latest
-          path: dist/macos
-
-      - name: Gather plugin files
+      - name: Place backend binaries into plugin directory
         run: |
-          mkdir -p release
-          cp dist/windows/*.streamDeckPlugin release/ || true
-          cp dist/macos/*.streamDeckPlugin release/ || true
+          ls -R backend
+          mkdir -p dev.miseinul.atem.sdPlugin
+          # Windows backend (.exe)
+          find backend -type f -name "streamdeck-atem.exe" -exec cp {} dev.miseinul.atem.sdPlugin/streamdeck-atem.exe \;
+          # macOS backend (no extension)
+          find backend -type f -name "streamdeck-atem" ! -name "*.exe" -exec cp {} dev.miseinul.atem.sdPlugin/streamdeck-atem \;
 
-      - name: Create GitHub Release
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Stream Deck CLI
+        run: npm install -g @elgato/cli@latest
+
+      - name: Validate plugin
+        run: streamdeck validate dev.miseinul.atem.sdPlugin
+
+      - name: Pack plugin
+        run: |
+          mkdir -p dist
+          streamdeck pack dev.miseinul.atem.sdPlugin --output dist --no-update-check -f
+
+      - name: Upload .streamDeckPlugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamdeck-atem-plugin
+          path: dist/
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.streamDeckPlugin
+          files: dist/*.streamDeckPlugin
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
           name: ${{ (contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta')) && format('Beta {0}', github.ref_name) || format('Release {0}', github.ref_name) }}
           body: ${{ (contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta')) && format('This is a beta release for {0}. It is intended for testing and may be unstable.', github.ref_name) || format('Stable release {0}.', github.ref_name) }}
