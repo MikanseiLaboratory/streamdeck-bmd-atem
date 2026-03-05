@@ -10,7 +10,6 @@
       Object.assign(SDPIComponents.i18n.locales.en, {
         atem_ip_label: 'ATEM IP address',
         me_label: 'ME (Mix Effect) index',
-        video_source_label: 'Video source (program/preview)',
         status_label: 'Connection',
         status_connected: 'Connected to ATEM',
         status_disconnected: 'Not connected'
@@ -24,18 +23,18 @@
   </style>
 </head>
 <body>
-  <!-- Setting keys must match Rust ActionSettings: atem_ip, me, video_source -->
+  <!-- Setting keys used by this action: atem_ip, me -->
 
   <sdpi-item label="ATEM IP address">
     <sdpi-textfield setting="atem_ip" placeholder="192.168.1.100"></sdpi-textfield>
   </sdpi-item>
 
   <sdpi-item label="ME (Mix Effect) index">
-    <sdpi-textfield setting="me" placeholder="0" pattern="[0-9]+"></sdpi-textfield>
-  </sdpi-item>
-
-  <sdpi-item label="Video source (for program/preview)">
-    <sdpi-textfield setting="video_source" placeholder="e.g. 1 = Input 1" pattern="[0-9]+"></sdpi-textfield>
+    <sdpi-select
+      setting="me"
+      datasource="atem_me_options"
+      loading="Loading M/Es...">
+    </sdpi-select>
   </sdpi-item>
 
   <sdpi-item label="Connection">

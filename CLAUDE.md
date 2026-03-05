@@ -15,10 +15,10 @@ The plugin exposes multiple dedicated Stream Deck actions (see `dev.miseinul.ate
 
 - `dev.miseinul.atem.cut` – ATEM Cut
 - `dev.miseinul.atem.auto` – ATEM Auto
-- `dev.miseinul.atem.program-input` – ATEM Program Input
-- `dev.miseinul.atem.preview-input` – ATEM Preview Input
-- `dev.miseinul.atem.cut-black` – ATEM Cut to Black
-- `dev.miseinul.atem.fade-to-black` – ATEM Fade to Black
+- `dev.miseinul.atem.programinput` – ATEM Program Input
+- `dev.miseinul.atem.previewinput` – ATEM Preview Input
+- `dev.miseinul.atem.cuttoblack` – ATEM Cut to Black
+- `dev.miseinul.atem.fadetoblack` – ATEM Fade to Black
 
 Each action has its own Property Inspector HTML (`PropertyInspector/*.html`) but they all bind the same per‑action settings struct on the Rust side:
 
@@ -107,7 +107,7 @@ The plugin deliberately avoids keeping its own notion of which input is on Progr
 
 - Filters `key_registry` for keys:
   - Whose `settings.atem_ip` matches the ATEM IP.
-- Whose `action` UUID is `dev.miseinul.atem.program-input` or `dev.miseinul.atem.preview-input`.
+- Whose `action` UUID is `dev.miseinul.atem.programinput` or `dev.miseinul.atem.previewinput`.
 - For each such key:
   - Interprets the configured `video_source` as a `VideoSource`.
   - Compares it against `AtemState::get_program_source(me)` or `get_preview_source(me)`.

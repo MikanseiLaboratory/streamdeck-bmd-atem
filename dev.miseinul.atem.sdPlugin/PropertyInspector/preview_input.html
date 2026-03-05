@@ -31,11 +31,19 @@
   </sdpi-item>
 
   <sdpi-item label="ME (Mix Effect) index">
-    <sdpi-textfield setting="me" placeholder="0" pattern="[0-9]+"></sdpi-textfield>
+    <sdpi-select
+      setting="me"
+      datasource="atem_me_options"
+      loading="Loading M/Es...">
+    </sdpi-select>
   </sdpi-item>
 
   <sdpi-item label="Video source (for program/preview)">
-    <sdpi-textfield setting="video_source" placeholder="e.g. 1 = Input 1" pattern="[0-9]+"></sdpi-textfield>
+    <sdpi-select
+      setting="video_source"
+      datasource="atem_video_sources"
+      loading="Loading inputs...">
+    </sdpi-select>
   </sdpi-item>
 
   <sdpi-item label="Connection">

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
-  "SDKVersion": 2,
+  "SDKVersion": 3,
   "Author": "streamdeck-atem-rs",
   "CodePath": "streamdeck-atem",
   "CodePathMac": "streamdeck-atem",
@@ -54,7 +54,7 @@
       "Tooltip": "Perform an AUTO transition on the configured ATEM ME."
     },
     {
-      "UUID": "dev.miseinul.atem.program-input",
+      "UUID": "dev.miseinul.atem.programinput",
       "Icon": "Images/icon",
       "Name": "ATEM Program Input",
       "PropertyInspectorPath": "PropertyInspector/program_input.html",
@@ -67,7 +67,7 @@
       "Tooltip": "Switch the ATEM program bus to the configured input."
     },
     {
-      "UUID": "dev.miseinul.atem.preview-input",
+      "UUID": "dev.miseinul.atem.previewinput",
       "Icon": "Images/icon",
       "Name": "ATEM Preview Input",
       "PropertyInspectorPath": "PropertyInspector/preview_input.html",
@@ -80,7 +80,7 @@
       "Tooltip": "Switch the ATEM preview bus to the configured input."
     },
     {
-      "UUID": "dev.miseinul.atem.cut-black",
+      "UUID": "dev.miseinul.atem.cuttoblack",
       "Icon": "Images/icon",
       "Name": "ATEM Cut to Black",
       "PropertyInspectorPath": "PropertyInspector/cut_black.html",
@@ -93,7 +93,7 @@
       "Tooltip": "Perform a CUT to black on the configured ATEM ME."
     },
     {
-      "UUID": "dev.miseinul.atem.fade-to-black",
+      "UUID": "dev.miseinul.atem.fadetoblack",
       "Icon": "Images/icon",
       "Name": "ATEM Fade to Black",
       "PropertyInspectorPath": "PropertyInspector/fade_to_black.html",
