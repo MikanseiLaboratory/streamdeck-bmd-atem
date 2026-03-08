@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 streamdeck-rs = { git = "https://github.com/FlowingSPDG/streamdeck-rs", rev = "4bdee355f5135a10cfc949d50efb675434cc2919" }
-necromancer = { git = "https://github.com/micolous/necromancer" }
+necromancer = { git = "https://github.com/Incomplete-Outputs-Lab/necromancer", branch = "feat/streamdeck" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

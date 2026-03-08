@@ -104,6 +104,71 @@
         }
       ],
       "Tooltip": "Toggle FADE TO BLACK on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.auxoutput",
+      "Icon": "Images/icon",
+      "Name": "ATEM AUX Output",
+      "PropertyInspectorPath": "PropertyInspector/aux_output.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set the source for an AUX bus output."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskauto",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Auto",
+      "PropertyInspectorPath": "PropertyInspector/dsk_auto.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Trigger DSK auto transition."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskonair",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK On Air",
+      "PropertyInspectorPath": "PropertyInspector/dsk_on_air.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Toggle or set DSK on-air state."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskcut",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Cut Source",
+      "PropertyInspectorPath": "PropertyInspector/dsk_cut.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set DSK cut source."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskfill",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Fill Source",
+      "PropertyInspectorPath": "PropertyInspector/dsk_fill.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set DSK fill source."
     }
   ]
 }
