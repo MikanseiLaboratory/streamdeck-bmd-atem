@@ -24,10 +24,10 @@ struct GlobalSettings {
 /// Indexed by Stream Deck context.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyConfig {
-    action: String,
-    context: String,
+    pub(crate) action: String,
+    pub(crate) context: String,
     device: Option<String>,
-    settings: serde_json::Value,
+    pub(crate) settings: serde_json::Value,
 }
 
 /// Deserializes JSON number or string into u8 (for PI textfield/range values).
@@ -76,6 +76,26 @@ where
     }
 }
 
+/// Deserializes JSON bool or string "true"/"false" into Option<bool> (for PI select).
+pub(crate) fn de_optional_bool_from_str_or_bool<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
 /// High-level ATEM action derived from Stream Deck action UUID and settings.
 pub(crate) enum AtemAction {
     Cut { me: u8 },
@@ -84,6 +104,16 @@ pub(crate) enum AtemAction {
     PreviewInput { me: u8, source: VideoSource },
     CutBlack { me: u8 },
     FadeToBlack { me: u8 },
+    /// Set AUX bus output source.
+    AuxSource { aux_bus: u8, source: VideoSource },
+    /// Trigger DSK auto transition.
+    DskAuto { key: u8 },
+    /// Set DSK on-air state.
+    SetDskOnAir { key: u8, on_air: bool },
+    /// Set DSK cut source.
+    SetDskCutSource { key: u8, source: VideoSource },
+    /// Set DSK fill source.
+    SetDskFillSource { key: u8, source: VideoSource },
 }
 
 /// Message from Property Inspector to plugin (SendToPlugin payload).
@@ -108,6 +138,17 @@ pub(crate) struct LogRequest {
 pub(crate) struct SetImageRequest {
     context: String,
     image: Option<String>,
+}
+
+/// Request to show alert on a key (e.g. when ATEM IP is not set).
+pub(crate) struct ShowAlertRequest {
+    context: String,
+}
+
+/// Request to persist action settings (e.g. after DialRotate AUX source).
+pub(crate) struct SetSettingsRequest {
+    pub context: String,
+    pub settings: serde_json::Value,
 }
 
 /// Tracks which (action, context) want ATEM state updates for which IP.
@@ -223,9 +264,14 @@ async fn main() {
 
     let (pi_tx, mut pi_rx) = mpsc::unbounded_channel::<SendToPIRequest>();
     let (image_tx, mut image_rx) = mpsc::unbounded_channel::<SetImageRequest>();
+    let (alert_tx, mut alert_rx) = mpsc::unbounded_channel::<ShowAlertRequest>();
+    let (set_settings_tx, mut set_settings_rx) =
+        mpsc::unbounded_channel::<crate::SetSettingsRequest>();
 
     let pi_tx = Arc::new(pi_tx);
     let image_tx = Arc::new(image_tx);
+    let alert_tx = Arc::new(alert_tx);
+    let set_settings_tx = Arc::new(set_settings_tx);
     let atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let pi_subscriptions = Arc::new(RwLock::new(PiSubscriptions::new()));
@@ -250,6 +296,8 @@ async fn main() {
                     Arc::clone(&log_tx),
                     Arc::clone(&key_registry),
                     Arc::clone(&image_tx),
+                    Arc::clone(&alert_tx),
+                    Arc::clone(&set_settings_tx),
                 )
                 .await
                 {
@@ -280,6 +328,24 @@ async fn main() {
                     log_warn(&log_tx, format!("send SetImage failed: {}", e));
                 }
             }
+            Some(alert_req) = alert_rx.recv() => {
+                let out = MessageOut::<GlobalSettings, serde_json::Value, PIMessageOut>::ShowAlert {
+                    context: alert_req.context,
+                };
+                if let Err(e) = socket.send(out).await {
+                    log_warn(&log_tx, format!("send ShowAlert failed: {}", e));
+                }
+            }
+            Some(set_req) = set_settings_rx.recv() => {
+                let out =
+                    MessageOut::<GlobalSettings, serde_json::Value, PIMessageOut>::SetSettings {
+                        context: set_req.context,
+                        payload: set_req.settings,
+                    };
+                if let Err(e) = socket.send(out).await {
+                    log_warn(&log_tx, format!("send SetSettings failed: {}", e));
+                }
+            }
             Some(log_req) = log_rx.recv() => {
                 let out = MessageOut::<GlobalSettings, serde_json::Value, PIMessageOut>::LogMessage {
                     payload: LogMessagePayload {
@@ -296,6 +362,93 @@ async fn main() {
 
 const ATEM_PORT: u16 = 9910;
 
+/// Dispatches KeyDown/DialPress to the same per-action handlers.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_key_or_dial_press(
+    action: &str,
+    context: &str,
+    settings: &serde_json::Value,
+    atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>>,
+    pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
+    pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
+    log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
+    key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
+    alert_tx: Arc<mpsc::UnboundedSender<ShowAlertRequest>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match action {
+        "dev.miseinul.atem.cut"
+        | "dev.miseinul.atem.auto"
+        | "dev.miseinul.atem.cuttoblack"
+        | "dev.miseinul.atem.fadetoblack" => {
+            actions::basic_transition::handle_key_down_basic_transition(
+                action,
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.programinput" | "dev.miseinul.atem.previewinput" => {
+            actions::program_preview::handle_key_down_program_preview(
+                action,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.auxoutput" => {
+            actions::aux_output::handle_key_down_aux_output(
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+                alert_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.dskauto"
+        | "dev.miseinul.atem.dskonair"
+        | "dev.miseinul.atem.dskcut"
+        | "dev.miseinul.atem.dskfill" => {
+            actions::dsk::handle_key_down_dsk(
+                action,
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+                alert_tx,
+            )
+            .await?;
+        }
+        _ => {
+            log_warn(
+                &log_tx,
+                format!("KeyDown/DialDown: unsupported or unknown action uuid={}", action),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_message(
     msg: &streamdeck_rs::Message<GlobalSettings, serde_json::Value, PIMessageIn>,
     pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
@@ -304,6 +457,8 @@ async fn handle_message(
     log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
     key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
     image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
+    alert_tx: Arc<mpsc::UnboundedSender<ShowAlertRequest>>,
+    set_settings_tx: Arc<mpsc::UnboundedSender<SetSettingsRequest>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match msg {
         Message::KeyDown { action, context, payload, .. } => {
@@ -314,45 +469,60 @@ async fn handle_message(
                     action, context, payload.settings
                 ),
             );
-
-            // Dispatch to per-action handlers.
-            match action.as_str() {
-                "dev.miseinul.atem.cut"
-                | "dev.miseinul.atem.auto"
-                | "dev.miseinul.atem.cuttoblack"
-                | "dev.miseinul.atem.fadetoblack" => {
-                    actions::basic_transition::handle_key_down_basic_transition(
-                        action,
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                    )
-                    .await?;
-                }
-                "dev.miseinul.atem.programinput" | "dev.miseinul.atem.previewinput" => {
-                    actions::program_preview::handle_key_down_program_preview(
-                        action,
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                    )
-                    .await?;
-                }
-                _ => {
-                    log_warn(
-                        &log_tx,
-                        format!("KeyDown: unsupported or unknown action uuid={}", action),
-                    );
-                }
+            dispatch_key_or_dial_press(
+                action.as_str(),
+                context,
+                &payload.settings,
+                atem_cache.clone(),
+                pi_tx.clone(),
+                pi_subscriptions.clone(),
+                log_tx.clone(),
+                key_registry.clone(),
+                image_tx.clone(),
+                alert_tx.clone(),
+            )
+            .await?;
+        }
+        Message::DialDown { action, context, payload, .. } => {
+            log_info(
+                &log_tx,
+                format!(
+                    "DialDown action={} context={} settings={:?}",
+                    action, context, payload.settings
+                ),
+            );
+            dispatch_key_or_dial_press(
+                action.as_str(),
+                context,
+                &payload.settings,
+                atem_cache.clone(),
+                pi_tx.clone(),
+                pi_subscriptions.clone(),
+                log_tx.clone(),
+                key_registry.clone(),
+                image_tx.clone(),
+                alert_tx.clone(),
+            )
+            .await?;
+        }
+        Message::DialRotate { action, context, payload, .. } => {
+            if action.as_str() == "dev.miseinul.atem.auxoutput" {
+                actions::aux_output::handle_dial_rotate_aux_output(
+                    context,
+                    &payload.settings,
+                    payload.ticks,
+                    atem_cache.clone(),
+                    pi_tx.clone(),
+                    pi_subscriptions.clone(),
+                    log_tx.clone(),
+                    key_registry.clone(),
+                    image_tx.clone(),
+                    set_settings_tx.clone(),
+                    alert_tx.clone(),
+                )
+                .await?;
             }
+            // Other actions ignore DialRotate.
         }
         Message::KeyUp { action, context, payload, .. } => {
             log_info(
@@ -424,6 +594,29 @@ async fn handle_message(
                             &image_tx,
                             &log_tx,
                             false,
+                        )
+                        .await;
+                        actions::dsk::update_dsk_on_air_key_images_from_state(
+                            &ip,
+                            state,
+                            &key_registry,
+                            &image_tx,
+                            &log_tx,
+                        )
+                        .await;
+                        actions::basic_transition::update_auto_transition_key_images_from_state(
+                            &ip,
+                            state,
+                            &key_registry,
+                            &image_tx,
+                            &log_tx,
+                        )
+                        .await;
+                        actions::dsk::update_dsk_auto_key_images_from_state(
+                            &ip,
+                            state,
+                            &key_registry,
+                            &image_tx,
                         )
                         .await;
                     }
@@ -699,6 +892,233 @@ async fn handle_message(
                         });
                     }
 
+                    // AUX bus list - use ATEM topology.auxs when possible.
+                    "atem_aux_options" => {
+                        let mut items = Vec::new();
+                        let mut connected = false;
+
+                        if let Some(entry) = key_registry.read().await.get(context) {
+                            let ip = entry
+                                .settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+
+                            if let Some(ip) = ip {
+                                if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    connected = true;
+                                    let state_guard = controller.get_state().await;
+                                    let state: &AtemState = &*state_guard;
+                                    let aux_count = state.topology.auxs;
+
+                                    for bus in 0..aux_count {
+                                        items.push(serde_json::json!({
+                                            "label": format!("AUX {}", bus),
+                                            "value": bus.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
+                        if items.is_empty() {
+                            items = (0u8..=3)
+                                .map(|bus| {
+                                    serde_json::json!({
+                                        "label": format!("AUX {}", bus),
+                                        "value": bus.to_string(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                        }
+
+                        let response_payload = serde_json::json!({
+                            "event": event_name,
+                            "items": items,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: response_payload,
+                        });
+
+                        let status_payload = serde_json::json!({
+                            "event": "atem_state",
+                            "connected": connected,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: status_payload,
+                        });
+                    }
+
+                    // AUX video sources: inputs + M/E Program & Preview (for AUX output action).
+                    "atem_aux_video_sources" => {
+                        let mut items = Vec::new();
+                        let mut connected = false;
+
+                        if let Some(entry) = key_registry.read().await.get(context) {
+                            let ip = entry
+                                .settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+
+                            if let Some(ip) = ip {
+                                if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    connected = true;
+                                    let state_guard = controller.get_state().await;
+                                    let state: &AtemState = &*state_guard;
+
+                                    let mut ids: Vec<u16> = state
+                                        .input_properties
+                                        .keys()
+                                        .filter_map(|src| {
+                                            let id = *src as u16;
+                                            if (1..=40).contains(&id) {
+                                                Some(id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+                                    ids.sort_unstable();
+                                    ids.dedup();
+                                    for id in ids {
+                                        items.push(serde_json::json!({
+                                            "label": format!("Input {}", id),
+                                            "value": id.to_string(),
+                                        }));
+                                    }
+
+                                    let mes = state.topology.mes;
+                                    const ME_SOURCES: &[(u16, &str)] = &[
+                                        (10010, "M/E 1 Program"),
+                                        (10011, "M/E 1 Preview"),
+                                        (10020, "M/E 2 Program"),
+                                        (10021, "M/E 2 Preview"),
+                                        (10030, "M/E 3 Program"),
+                                        (10031, "M/E 3 Preview"),
+                                        (10040, "M/E 4 Program"),
+                                        (10041, "M/E 4 Preview"),
+                                    ];
+                                    for (val, label) in ME_SOURCES.iter().take((mes as usize) * 2) {
+                                        items.push(serde_json::json!({
+                                            "label": *label,
+                                            "value": val.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
+                        if items.is_empty() {
+                            items = (1u16..=20)
+                                .map(|id| {
+                                    serde_json::json!({
+                                        "label": format!("Input {}", id),
+                                        "value": id.to_string(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            for (val, label) in &[
+                                (10010u16, "M/E 1 Program"),
+                                (10011, "M/E 1 Preview"),
+                                (10020, "M/E 2 Program"),
+                                (10021, "M/E 2 Preview"),
+                            ] {
+                                items.push(serde_json::json!({
+                                    "label": *label,
+                                    "value": val.to_string(),
+                                }));
+                            }
+                        }
+
+                        let response_payload = serde_json::json!({
+                            "event": event_name,
+                            "items": items,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: response_payload,
+                        });
+
+                        let status_payload = serde_json::json!({
+                            "event": "atem_state",
+                            "connected": connected,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: status_payload,
+                        });
+                    }
+
+                    // DSK key index list - use state.dsk_state keys or default 0,1.
+                    "atem_dsk_options" => {
+                        let mut items = Vec::new();
+                        let mut connected = false;
+
+                        if let Some(entry) = key_registry.read().await.get(context) {
+                            let ip = entry
+                                .settings
+                                .get("atem_ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+
+                            if let Some(ip) = ip {
+                                if let Some(controller) = atem_cache.read().await.get(&ip) {
+                                    connected = true;
+                                    let state_guard = controller.get_state().await;
+                                    let state: &AtemState = &*state_guard;
+                                    let mut keys: Vec<u8> = state.dsk_state.keys().copied().collect();
+                                    keys.sort_unstable();
+                                    if keys.is_empty() {
+                                        keys = vec![0, 1];
+                                    }
+                                    for k in keys {
+                                        items.push(serde_json::json!({
+                                            "label": format!("DSK {}", k),
+                                            "value": k.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
+                        if items.is_empty() {
+                            items = vec![
+                                serde_json::json!({ "label": "DSK 0", "value": "0" }),
+                                serde_json::json!({ "label": "DSK 1", "value": "1" }),
+                            ];
+                        }
+
+                        let response_payload = serde_json::json!({
+                            "event": event_name,
+                            "items": items,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: response_payload,
+                        });
+
+                        let status_payload = serde_json::json!({
+                            "event": "atem_state",
+                            "connected": connected,
+                        });
+                        let _ = pi_tx.send(SendToPIRequest {
+                            action: action.clone(),
+                            context: context.clone(),
+                            payload: status_payload,
+                        });
+                    }
+
                     _ => {}
                 }
             }
@@ -812,14 +1232,8 @@ async fn forward_atem_state_to_pi(
             }
         }
 
-        // Only touch key images when ATEM actually reports program/preview changes.
-        if !updated.intersects(StateUpdate::PREVIEW_OR_PROGRAM_SOURCE) {
-            log_info(
-                &log_tx,
-                "ATEM state update did not include PREVIEW_OR_PROGRAM_SOURCE; skipping key image update",
-            );
-            continue;
-        }
+        // Update key images for program/preview when those change.
+        if updated.intersects(StateUpdate::PREVIEW_OR_PROGRAM_SOURCE) {
 
         // Query the authoritative state from the controller once per update.
         let state_guard = controller.get_state().await;
@@ -847,6 +1261,42 @@ async fn forward_atem_state_to_pi(
                 &image_tx,
                 &log_tx,
                 false,
+            )
+            .await;
+        }
+        }
+
+        // Update Auto Transition key images when transition position changes.
+        if updated.intersects(StateUpdate::TRANSITION_POSITION) {
+            let state_guard = controller.get_state().await;
+            let state: &AtemState = &*state_guard;
+            actions::basic_transition::update_auto_transition_key_images_from_state(
+                &ip,
+                state,
+                &key_registry,
+                &image_tx,
+                &log_tx,
+            )
+            .await;
+        }
+
+        // Update DSK On Air and DSK Auto key images when DSK state changes.
+        if updated.intersects(StateUpdate::DSK_STATE) {
+            let state_guard = controller.get_state().await;
+            let state: &AtemState = &*state_guard;
+            actions::dsk::update_dsk_on_air_key_images_from_state(
+                &ip,
+                state,
+                &key_registry,
+                &image_tx,
+                &log_tx,
+            )
+            .await;
+            actions::dsk::update_dsk_auto_key_images_from_state(
+                &ip,
+                state,
+                &key_registry,
+                &image_tx,
             )
             .await;
         }
@@ -886,17 +1336,28 @@ pub(crate) fn video_source_from_id(video_source_id: u16) -> VideoSource {
 impl AtemAction {
     /// Execute this high-level ATEM action against the controller.
     async fn execute(&self, controller: &AtemController) -> Result<(), necromancer::Error> {
-        match *self {
-            AtemAction::Cut { me } => controller.cut(me).await,
-            AtemAction::Auto { me } => controller.auto(me).await,
+        match self {
+            AtemAction::Cut { me } => controller.cut(*me).await,
+            AtemAction::Auto { me } => controller.auto(*me).await,
             AtemAction::ProgramInput { me, source } => {
-                controller.set_program_input(me, source).await
+                controller.set_program_input(*me, *source).await
             }
             AtemAction::PreviewInput { me, source } => {
-                controller.set_preview_input(me, source).await
+                controller.set_preview_input(*me, *source).await
             }
-            AtemAction::CutBlack { me } => controller.cut_black(me, true).await,
-            AtemAction::FadeToBlack { me } => controller.toggle_auto_black(me).await,
+            AtemAction::CutBlack { me } => controller.cut_black(*me, true).await,
+            AtemAction::FadeToBlack { me } => controller.toggle_auto_black(*me).await,
+            AtemAction::AuxSource { aux_bus, source } => {
+                controller.set_aux_source(*aux_bus, *source).await
+            }
+            AtemAction::DskAuto { key } => controller.dsk_auto(*key).await,
+            AtemAction::SetDskOnAir { key, on_air } => controller.set_dsk_on_air(*key, *on_air).await,
+            AtemAction::SetDskCutSource { key, source } => {
+                controller.set_dsk_cut_source(*key, *source).await
+            }
+            AtemAction::SetDskFillSource { key, source } => {
+                controller.set_dsk_fill_source(*key, *source).await
+            }
         }
     }
 }

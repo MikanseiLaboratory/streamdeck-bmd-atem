@@ -31,6 +31,10 @@
       "UUID": "dev.miseinul.atem.cut",
       "Icon": "Images/icon",
       "Name": "ATEM Cut",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/cut.html",
       "States": [
         {
@@ -44,6 +48,10 @@
       "UUID": "dev.miseinul.atem.auto",
       "Icon": "Images/icon",
       "Name": "ATEM Auto",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/auto.html",
       "States": [
         {
@@ -57,6 +65,10 @@
       "UUID": "dev.miseinul.atem.programinput",
       "Icon": "Images/icon",
       "Name": "ATEM Program Input",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/program_input.html",
       "States": [
         {
@@ -70,6 +82,10 @@
       "UUID": "dev.miseinul.atem.previewinput",
       "Icon": "Images/icon",
       "Name": "ATEM Preview Input",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/preview_input.html",
       "States": [
         {
@@ -83,6 +99,10 @@
       "UUID": "dev.miseinul.atem.cuttoblack",
       "Icon": "Images/icon",
       "Name": "ATEM Cut to Black",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/cut_black.html",
       "States": [
         {
@@ -96,6 +116,10 @@
       "UUID": "dev.miseinul.atem.fadetoblack",
       "Icon": "Images/icon",
       "Name": "ATEM Fade to Black",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
       "PropertyInspectorPath": "PropertyInspector/fade_to_black.html",
       "States": [
         {
@@ -104,6 +128,98 @@
         }
       ],
       "Tooltip": "Toggle FADE TO BLACK on the configured ATEM ME."
+    },
+    {
+      "UUID": "dev.miseinul.atem.auxoutput",
+      "Icon": "Images/icon",
+      "Name": "ATEM AUX Output",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "PropertyInspector/aux_output.html",
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Push": "Set AUX source",
+          "Rotate": "Cycle AUX source"
+        }
+      },
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set the source for an AUX bus output."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskauto",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Auto",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "PropertyInspector/dsk_auto.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Trigger DSK auto transition."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskonair",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK On Air",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "PropertyInspector/dsk_on_air.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Toggle or set DSK on-air state."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskcut",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Cut Source",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "PropertyInspector/dsk_cut.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set DSK cut source."
+    },
+    {
+      "UUID": "dev.miseinul.atem.dskfill",
+      "Icon": "Images/icon",
+      "Name": "ATEM DSK Fill Source",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "PropertyInspector/dsk_fill.html",
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set DSK fill source."
     }
   ]
 }
