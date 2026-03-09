@@ -24,10 +24,10 @@ struct GlobalSettings {
 /// Indexed by Stream Deck context.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyConfig {
-    action: String,
-    context: String,
+    pub(crate) action: String,
+    pub(crate) context: String,
     device: Option<String>,
-    settings: serde_json::Value,
+    pub(crate) settings: serde_json::Value,
 }
 
 /// Deserializes JSON number or string into u8 (for PI textfield/range values).
@@ -145,6 +145,12 @@ pub(crate) struct ShowAlertRequest {
     context: String,
 }
 
+/// Request to persist action settings (e.g. after DialRotate AUX source).
+pub(crate) struct SetSettingsRequest {
+    pub context: String,
+    pub settings: serde_json::Value,
+}
+
 /// Tracks which (action, context) want ATEM state updates for which IP.
 pub(crate) struct PiSubscriptions {
     /// IP -> set of (action, context) that show PI for that ATEM.
@@ -259,10 +265,13 @@ async fn main() {
     let (pi_tx, mut pi_rx) = mpsc::unbounded_channel::<SendToPIRequest>();
     let (image_tx, mut image_rx) = mpsc::unbounded_channel::<SetImageRequest>();
     let (alert_tx, mut alert_rx) = mpsc::unbounded_channel::<ShowAlertRequest>();
+    let (set_settings_tx, mut set_settings_rx) =
+        mpsc::unbounded_channel::<crate::SetSettingsRequest>();
 
     let pi_tx = Arc::new(pi_tx);
     let image_tx = Arc::new(image_tx);
     let alert_tx = Arc::new(alert_tx);
+    let set_settings_tx = Arc::new(set_settings_tx);
     let atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let pi_subscriptions = Arc::new(RwLock::new(PiSubscriptions::new()));
@@ -288,6 +297,7 @@ async fn main() {
                     Arc::clone(&key_registry),
                     Arc::clone(&image_tx),
                     Arc::clone(&alert_tx),
+                    Arc::clone(&set_settings_tx),
                 )
                 .await
                 {
@@ -326,6 +336,16 @@ async fn main() {
                     log_warn(&log_tx, format!("send ShowAlert failed: {}", e));
                 }
             }
+            Some(set_req) = set_settings_rx.recv() => {
+                let out =
+                    MessageOut::<GlobalSettings, serde_json::Value, PIMessageOut>::SetSettings {
+                        context: set_req.context,
+                        payload: set_req.settings,
+                    };
+                if let Err(e) = socket.send(out).await {
+                    log_warn(&log_tx, format!("send SetSettings failed: {}", e));
+                }
+            }
             Some(log_req) = log_rx.recv() => {
                 let out = MessageOut::<GlobalSettings, serde_json::Value, PIMessageOut>::LogMessage {
                     payload: LogMessagePayload {
@@ -342,6 +362,93 @@ async fn main() {
 
 const ATEM_PORT: u16 = 9910;
 
+/// Dispatches KeyDown/DialPress to the same per-action handlers.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_key_or_dial_press(
+    action: &str,
+    context: &str,
+    settings: &serde_json::Value,
+    atem_cache: Arc<RwLock<HashMap<String, Arc<AtemController>>>>,
+    pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
+    pi_subscriptions: Arc<RwLock<PiSubscriptions>>,
+    log_tx: Arc<mpsc::UnboundedSender<LogRequest>>,
+    key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
+    image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
+    alert_tx: Arc<mpsc::UnboundedSender<ShowAlertRequest>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match action {
+        "dev.miseinul.atem.cut"
+        | "dev.miseinul.atem.auto"
+        | "dev.miseinul.atem.cuttoblack"
+        | "dev.miseinul.atem.fadetoblack" => {
+            actions::basic_transition::handle_key_down_basic_transition(
+                action,
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.programinput" | "dev.miseinul.atem.previewinput" => {
+            actions::program_preview::handle_key_down_program_preview(
+                action,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.auxoutput" => {
+            actions::aux_output::handle_key_down_aux_output(
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+                alert_tx,
+            )
+            .await?;
+        }
+        "dev.miseinul.atem.dskauto"
+        | "dev.miseinul.atem.dskonair"
+        | "dev.miseinul.atem.dskcut"
+        | "dev.miseinul.atem.dskfill" => {
+            actions::dsk::handle_key_down_dsk(
+                action,
+                context,
+                settings,
+                atem_cache,
+                pi_tx,
+                pi_subscriptions,
+                log_tx,
+                key_registry,
+                image_tx,
+                alert_tx,
+            )
+            .await?;
+        }
+        _ => {
+            log_warn(
+                &log_tx,
+                format!("KeyDown/DialDown: unsupported or unknown action uuid={}", action),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_message(
     msg: &streamdeck_rs::Message<GlobalSettings, serde_json::Value, PIMessageIn>,
     pi_tx: Arc<mpsc::UnboundedSender<SendToPIRequest>>,
@@ -351,6 +458,7 @@ async fn handle_message(
     key_registry: Arc<RwLock<HashMap<String, KeyConfig>>>,
     image_tx: Arc<mpsc::UnboundedSender<SetImageRequest>>,
     alert_tx: Arc<mpsc::UnboundedSender<ShowAlertRequest>>,
+    set_settings_tx: Arc<mpsc::UnboundedSender<SetSettingsRequest>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match msg {
         Message::KeyDown { action, context, payload, .. } => {
@@ -361,78 +469,60 @@ async fn handle_message(
                     action, context, payload.settings
                 ),
             );
-
-            // Dispatch to per-action handlers.
-            match action.as_str() {
-                "dev.miseinul.atem.cut"
-                | "dev.miseinul.atem.auto"
-                | "dev.miseinul.atem.cuttoblack"
-                | "dev.miseinul.atem.fadetoblack" => {
-                    actions::basic_transition::handle_key_down_basic_transition(
-                        action.as_str(),
-                        context,
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                    )
-                    .await?;
-                }
-                "dev.miseinul.atem.programinput" | "dev.miseinul.atem.previewinput" => {
-                    actions::program_preview::handle_key_down_program_preview(
-                        action.as_str(),
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                    )
-                    .await?;
-                }
-                "dev.miseinul.atem.auxoutput" => {
-                    actions::aux_output::handle_key_down_aux_output(
-                        context,
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                        Arc::clone(&alert_tx),
-                    )
-                    .await?;
-                }
-                "dev.miseinul.atem.dskauto"
-                | "dev.miseinul.atem.dskonair"
-                | "dev.miseinul.atem.dskcut"
-                | "dev.miseinul.atem.dskfill" => {
-                    actions::dsk::handle_key_down_dsk(
-                        action.as_str(),
-                        context,
-                        &payload.settings,
-                        Arc::clone(&atem_cache),
-                        Arc::clone(&pi_tx),
-                        Arc::clone(&pi_subscriptions),
-                        Arc::clone(&log_tx),
-                        Arc::clone(&key_registry),
-                        Arc::clone(&image_tx),
-                        Arc::clone(&alert_tx),
-                    )
-                    .await?;
-                }
-                _ => {
-                    log_warn(
-                        &log_tx,
-                        format!("KeyDown: unsupported or unknown action uuid={}", action),
-                    );
-                }
+            dispatch_key_or_dial_press(
+                action.as_str(),
+                context,
+                &payload.settings,
+                atem_cache.clone(),
+                pi_tx.clone(),
+                pi_subscriptions.clone(),
+                log_tx.clone(),
+                key_registry.clone(),
+                image_tx.clone(),
+                alert_tx.clone(),
+            )
+            .await?;
+        }
+        Message::DialDown { action, context, payload, .. } => {
+            log_info(
+                &log_tx,
+                format!(
+                    "DialDown action={} context={} settings={:?}",
+                    action, context, payload.settings
+                ),
+            );
+            dispatch_key_or_dial_press(
+                action.as_str(),
+                context,
+                &payload.settings,
+                atem_cache.clone(),
+                pi_tx.clone(),
+                pi_subscriptions.clone(),
+                log_tx.clone(),
+                key_registry.clone(),
+                image_tx.clone(),
+                alert_tx.clone(),
+            )
+            .await?;
+        }
+        Message::DialRotate { action, context, payload, .. } => {
+            if action.as_str() == "dev.miseinul.atem.auxoutput" {
+                actions::aux_output::handle_dial_rotate_aux_output(
+                    context,
+                    &payload.settings,
+                    payload.ticks,
+                    atem_cache.clone(),
+                    pi_tx.clone(),
+                    pi_subscriptions.clone(),
+                    log_tx.clone(),
+                    key_registry.clone(),
+                    image_tx.clone(),
+                    set_settings_tx.clone(),
+                    alert_tx.clone(),
+                )
+                .await?;
             }
+            // Other actions ignore DialRotate.
         }
         Message::KeyUp { action, context, payload, .. } => {
             log_info(
