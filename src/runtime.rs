@@ -1,9 +1,10 @@
 //! Shared ATEM connections, key tallies, and Property Inspector updates.
 //!
-//! [`AtemPool`] keeps one supervisor per switcher IP. Status and state events
-//! from that pool drive key images and any open inspector for the address.
+//! [`AtemPool`] keeps one supervisor per switcher in the global-settings catalog.
+//! Status and state events from that pool drive key images and any open inspector.
+//! A key selects its switcher with `atem_ip`. Closing the key does not disconnect it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -11,14 +12,17 @@ use necromancer::protocol::structs::VideoSource;
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
 use serde_json::Value;
-use streamdeck_plugin::{async_trait, CommandSender, PluginService, Result, Target};
+use streamdeck_plugin::{
+    async_trait, CommandSender, PluginLifecycle, PluginService, Result, Target,
+};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::contracts::{
-    cycle_index, normalized_ip, ActionSettings, AtemStateMessage, InspectorCommand, OptionsMessage,
-    SelectItem,
+    cycle_index, merge_catalog, normalized_ip, ActionSettings, AtemStateMessage, GlobalSettings,
+    InspectorCommand, InstanceConfig, InstanceStatusMessage, OptionsMessage, SelectItem,
+    StatusMessage,
 };
-use crate::pool::{AtemPool, ConnectionStatus, PoolEvent, PoolOptions};
+use crate::pool::{AtemInstanceConfig, AtemPool, ConnectionStatus, PoolEvent, PoolOptions};
 
 const IMAGE_RED: &str = "Images/red.png";
 const IMAGE_GREEN: &str = "Images/green.png";
@@ -54,6 +58,7 @@ impl Default for AppState {
                 pool: AtemPool::new(PoolOptions::default()),
                 keys: RwLock::new(HashMap::new()),
                 inspectors: RwLock::new(HashMap::new()),
+                global: RwLock::new(GlobalSettings::default()),
                 sender: Mutex::new(None),
                 listener_started: AtomicBool::new(false),
             }),
@@ -66,6 +71,7 @@ struct Runtime {
     keys: RwLock<HashMap<String, KeyRecord>>,
     /// Inspector contexts currently visible, mapped to the ATEM IP they watch.
     inspectors: RwLock<HashMap<String, Option<String>>>,
+    global: RwLock<GlobalSettings>,
     sender: Mutex<Option<CommandSender>>,
     listener_started: AtomicBool,
 }
@@ -73,8 +79,9 @@ struct Runtime {
 #[async_trait]
 impl PluginService for AppState {
     async fn start(&self, sender: CommandSender) -> Result<()> {
-        *self.runtime.sender.lock().await = Some(sender);
+        *self.runtime.sender.lock().await = Some(sender.clone());
         self.runtime.spawn_listener();
+        let _ = sender.get_global_settings(None);
         Ok(())
     }
 
@@ -89,8 +96,8 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        self.runtime.reconcile_all().await;
         if let Some(ip) = normalized_ip(settings) {
+            self.runtime.ensure_instance(&ip).await;
             self.runtime.refresh_ip(&ip).await;
         }
     }
@@ -98,7 +105,6 @@ impl AppState {
     pub async fn on_will_disappear(&self, context: &str) {
         self.runtime.keys.write().await.remove(context);
         self.runtime.inspectors.write().await.remove(context);
-        self.runtime.reconcile_all().await;
     }
 
     pub async fn on_settings_changed(
@@ -110,8 +116,8 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        self.runtime.reconcile_all().await;
         if let Some(ip) = normalized_ip(settings) {
+            self.runtime.ensure_instance(&ip).await;
             self.runtime.refresh_ip(&ip).await;
         }
         if self.runtime.inspectors.read().await.contains_key(context) {
@@ -135,13 +141,20 @@ impl AppState {
             .write()
             .await
             .insert(context.to_string(), normalized_ip(settings));
-        self.runtime.reconcile_all().await;
+        if let Some(ip) = normalized_ip(settings) {
+            self.runtime.ensure_instance(&ip).await;
+        }
         self.push_inspector(action, context, settings).await;
+        self.runtime.push_catalog_status().await;
     }
 
     pub async fn on_property_inspector_did_disappear(&self, context: &str) {
         self.runtime.inspectors.write().await.remove(context);
-        self.runtime.reconcile_all().await;
+    }
+
+    /// Apply `didReceiveGlobalSettings` and reconcile the connection catalog.
+    pub async fn apply_global_value(&self, value: &Value) {
+        self.runtime.apply_global_value(value).await;
     }
 
     pub async fn on_property_inspector_message(&self, context: &str, payload: &Value) {
@@ -173,7 +186,9 @@ impl AppState {
                 .await
                 .insert(context.to_string(), normalized_ip(&settings));
         }
-        self.runtime.reconcile_all().await;
+        if let Some(ip) = normalized_ip(&settings) {
+            self.runtime.ensure_instance(&ip).await;
+        }
         let (connected, detail) = self
             .runtime
             .connection_view(normalized_ip(&settings).as_deref())
@@ -361,10 +376,10 @@ impl AppState {
             }
             return None;
         };
-        if let Some(controller) = self.runtime.pool.controller(&ip).await {
+        self.runtime.ensure_instance(&ip).await;
+        if let Some(controller) = self.runtime.pool.controller_for_host(&ip).await {
             return Some(controller);
         }
-        self.runtime.reconcile_all().await;
         let (_, detail) = self.runtime.connection_view(Some(&ip)).await;
         let detail = if detail.is_empty() {
             "not connected".to_string()
@@ -397,6 +412,20 @@ impl AppState {
                 )
                 .await;
         }
+    }
+}
+
+/// Receives `didReceiveGlobalSettings`.
+pub struct GlobalHook {
+    /// Plugin state shared with the actions.
+    pub state: AppState,
+}
+
+#[async_trait]
+impl PluginLifecycle for GlobalHook {
+    async fn on_did_receive_global_settings(&mut self, settings: &Value) -> Result<()> {
+        self.state.apply_global_value(settings).await;
+        Ok(())
     }
 }
 
@@ -438,12 +467,15 @@ impl Runtime {
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(PoolEvent::Status { ip }) => runtime.on_pool_status(&ip).await,
-                    Ok(PoolEvent::State { ip, updated }) => {
-                        let Some(controller) = runtime.pool.controller(&ip).await else {
+                    Ok(PoolEvent::Status { id }) => runtime.on_pool_status(&id).await,
+                    Ok(PoolEvent::State { id, updated }) => {
+                        let Some(config) = runtime.pool.config(&id).await else {
                             continue;
                         };
-                        runtime.on_state(&ip, &controller, updated).await;
+                        let Some(controller) = runtime.pool.controller(&id).await else {
+                            continue;
+                        };
+                        runtime.on_state(&config.host, &controller, updated).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         runtime.refresh_connected().await;
@@ -454,51 +486,150 @@ impl Runtime {
         });
     }
 
-    async fn reconcile_all(&self) {
-        let wanted = self.wanted_ips().await;
-        let removed = self.pool.reconcile(wanted).await;
-        for ip in removed {
-            self.notify_ip(&ip, false, "Disconnected").await;
+    async fn apply_global_value(&self, value: &Value) {
+        let incoming = serde_json::from_value::<GlobalSettings>(value.clone()).unwrap_or_default();
+        let hosts = self.live_hosts().await;
+        let mut global = self.global.write().await;
+        let (settings, changed) = merge_catalog(incoming, &global.instances, &hosts);
+        *global = settings.clone();
+        drop(global);
+        if changed {
+            self.persist_global(&settings).await;
         }
+        self.apply_catalog(&settings).await;
     }
 
-    async fn wanted_ips(&self) -> HashSet<String> {
-        let mut ips = HashSet::new();
+    async fn ensure_instance(&self, host: &str) {
+        let host = host.trim();
+        if host.is_empty() {
+            return;
+        }
+        let mut global = self.global.write().await;
+        if global.instances.iter().any(|item| item.host.trim() == host) {
+            return;
+        }
+        global.instances.push(InstanceConfig::for_host(host));
+        let settings = global.clone();
+        drop(global);
+        self.persist_global(&settings).await;
+        self.apply_catalog(&settings).await;
+    }
+
+    async fn live_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
         for record in self.keys.read().await.values() {
-            if let Some(ip) = normalized_ip(&record.settings) {
-                ips.insert(ip);
+            if let Some(host) = normalized_ip(&record.settings) {
+                hosts.push(host);
             }
         }
-        for watched in self.inspectors.read().await.values() {
-            if let Some(ip) = watched.clone() {
-                ips.insert(ip);
+        for watched in self.inspectors.read().await.values().flatten() {
+            if !watched.is_empty() {
+                hosts.push(watched.clone());
             }
         }
-        ips
+        hosts
     }
 
-    async fn on_pool_status(&self, ip: &str) {
-        let Some(status) = self.pool.status(ip).await else {
+    async fn persist_global(&self, settings: &GlobalSettings) {
+        let Ok(payload) = serde_json::to_value(settings) else {
+            return;
+        };
+        let guard = self.sender.lock().await;
+        if let Some(sender) = guard.as_ref() {
+            let _ = sender.set_global_settings(&payload);
+        }
+    }
+
+    async fn apply_catalog(&self, settings: &GlobalSettings) {
+        let configs: Vec<AtemInstanceConfig> = settings
+            .instances
+            .iter()
+            .cloned()
+            .map(|instance| AtemInstanceConfig {
+                id: instance.id,
+                name: instance.name,
+                host: instance.host,
+                port: instance.port,
+                enabled: instance.enabled,
+            })
+            .collect();
+        let removed = self.pool.reconcile(configs).await;
+        for config in removed {
+            if self.pool.status_for_host(&config.host).await.is_none() {
+                self.notify_ip(&config.host, false, "Disconnected").await;
+            }
+        }
+        self.push_catalog_status().await;
+        for instance in &settings.instances {
+            if self
+                .pool
+                .status(&instance.id)
+                .await
+                .is_some_and(|status| status.is_connected())
+            {
+                self.refresh_ip(&instance.host).await;
+                self.push_options_for_ip(&instance.host, "").await;
+            }
+        }
+    }
+
+    async fn on_pool_status(&self, id: &str) {
+        let Some(config) = self.pool.config(id).await else {
+            return;
+        };
+        let Some(status) = self.pool.status(id).await else {
             return;
         };
         let connected = status.is_connected();
         let detail = status.detail();
+        let target = if config.port == crate::pool::ATEM_PORT {
+            config.host.clone()
+        } else {
+            format!("{}:{}", config.host, config.port)
+        };
         match &status {
+            ConnectionStatus::Disabled => {
+                self.log(&format!("ATEM {target} disabled")).await;
+            }
             ConnectionStatus::Connected => {
-                self.log(&format!("ATEM {ip} connected")).await;
+                self.log(&format!("ATEM {target} connected")).await;
             }
             ConnectionStatus::Connecting => {
-                self.log(&format!("ATEM {ip} connecting")).await;
+                self.log(&format!("ATEM {target} connecting")).await;
             }
             ConnectionStatus::Disconnected { message } => {
-                self.log(&format!("ATEM {ip} disconnected: {message}"))
+                self.log(&format!("ATEM {target} disconnected: {message}"))
                     .await;
             }
         }
-        self.notify_ip(ip, connected, &detail).await;
+        self.notify_ip(&config.host, connected, &detail).await;
         if connected {
-            self.refresh_ip(ip).await;
-            self.push_options_for_ip(ip, &detail).await;
+            self.refresh_ip(&config.host).await;
+            self.push_options_for_ip(&config.host, &detail).await;
+        }
+        self.push_catalog_status().await;
+    }
+
+    async fn push_catalog_status(&self) {
+        let instances = self
+            .pool
+            .statuses()
+            .await
+            .into_iter()
+            .map(|instance| InstanceStatusMessage {
+                id: instance.id,
+                name: instance.name,
+                host: instance.host,
+                port: instance.port,
+                enabled: instance.enabled,
+                status: instance.status.label().to_string(),
+                detail: instance.status.detail(),
+            })
+            .collect();
+        let message = StatusMessage::new(instances);
+        let contexts: Vec<String> = self.inspectors.read().await.keys().cloned().collect();
+        for context in contexts {
+            self.send_pi(&context, &message).await;
         }
     }
 
@@ -568,28 +699,22 @@ impl Runtime {
         let Some(ip) = ip else {
             return (false, String::new());
         };
-        match self.pool.status(ip).await {
+        match self.pool.status_for_host(ip).await {
             Some(status) => (status.is_connected(), status.detail()),
             None => (false, String::new()),
         }
     }
 
     async fn refresh_connected(&self) {
-        let ips: Vec<String> = self.wanted_ips().await.into_iter().collect();
-        for ip in ips {
-            if self
-                .pool
-                .status(&ip)
-                .await
-                .is_some_and(|status| status.is_connected())
-            {
-                self.refresh_ip(&ip).await;
+        for instance in self.pool.statuses().await {
+            if instance.status.is_connected() {
+                self.refresh_ip(&instance.host).await;
             }
         }
     }
 
     async fn refresh_ip(&self, ip: &str) {
-        let Some(controller) = self.pool.controller(ip).await else {
+        let Some(controller) = self.pool.controller_for_host(ip).await else {
             return;
         };
         let state = controller.get_state().await;
@@ -671,7 +796,7 @@ impl Runtime {
 
     async fn options(&self, kind: &str, settings: &ActionSettings) -> Vec<SelectItem> {
         let controller = match normalized_ip(settings) {
-            Some(ip) => self.pool.controller(&ip).await,
+            Some(ip) => self.pool.controller_for_host(&ip).await,
             None => None,
         };
         let state;

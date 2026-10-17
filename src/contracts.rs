@@ -82,11 +82,80 @@ pub struct InspectorCommand {
     pub atem_ip: Option<String>,
 }
 
+/// One switcher stored in Stream Deck global settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct InstanceConfig {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_port() -> u16 {
+    9910
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl InstanceConfig {
+    /// Catalog row created from an action's ATEM address.
+    pub fn for_host(host: &str) -> Self {
+        Self {
+            id: host.to_string(),
+            name: host.to_string(),
+            host: host.to_string(),
+            port: default_port(),
+            enabled: true,
+        }
+    }
+}
+
+/// Plugin-wide switcher catalog.
+///
+/// `seeded` records that the first global-settings read has been applied.
+/// An empty catalog is valid: this plugin does not insert a localhost switcher.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GlobalSettings {
+    #[serde(default)]
+    pub instances: Vec<InstanceConfig>,
+    #[serde(default)]
+    pub seeded: bool,
+}
+
+/// One catalog row sent to an open inspector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct InstanceStatusMessage {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub enabled: bool,
+    pub status: String,
+    pub detail: String,
+}
+
+/// `sendToPropertyInspector` payload listing every configured switcher.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct StatusMessage {
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub instances: Vec<InstanceStatusMessage>,
+}
+
 export_ts!(ActionSettings);
 export_ts!(SelectItem);
 export_ts!(AtemStateMessage);
 export_ts!(OptionsMessage);
 export_ts!(InspectorCommand);
+export_ts!(InstanceConfig);
+export_ts!(GlobalSettings);
+export_ts!(InstanceStatusMessage);
+export_ts!(StatusMessage);
 
 impl AtemStateMessage {
     pub fn new(connected: bool, detail: impl Into<String>) -> Self {
@@ -113,6 +182,52 @@ impl OptionsMessage {
             detail: detail.into(),
         }
     }
+}
+
+impl StatusMessage {
+    pub fn new(instances: Vec<InstanceStatusMessage>) -> Self {
+        Self {
+            r#type: "status".into(),
+            instances,
+        }
+    }
+}
+
+/// Fold locally added rows and live action hosts into `incoming`.
+///
+/// The returned flag is true when the result differs from `incoming`, including
+/// the first time `seeded` flips on. Callers persist only then, so an echoed
+/// `didReceiveGlobalSettings` does not write the catalog again.
+pub fn merge_catalog(
+    mut incoming: GlobalSettings,
+    memory: &[InstanceConfig],
+    hosts: &[String],
+) -> (GlobalSettings, bool) {
+    let before = incoming.clone();
+    for instance in memory {
+        if !incoming.instances.iter().any(|item| item.id == instance.id) {
+            incoming.instances.push(instance.clone());
+        }
+    }
+    for host in hosts {
+        let host = host.trim();
+        if host.is_empty() {
+            continue;
+        }
+        if incoming
+            .instances
+            .iter()
+            .any(|item| item.host.trim() == host)
+        {
+            continue;
+        }
+        incoming.instances.push(InstanceConfig::for_host(host));
+    }
+    if !incoming.seeded {
+        incoming.seeded = true;
+    }
+    let changed = incoming != before;
+    (incoming, changed)
 }
 
 /// Trimmed ATEM address, if the action has one.
@@ -213,5 +328,32 @@ mod tests {
         assert_eq!(cycle_index(4, 0, -1), 3);
         assert_eq!(cycle_index(4, 3, 2), 1);
         assert_eq!(cycle_index(0, 0, 5), 0);
+    }
+
+    #[test]
+    fn global_settings_default_port_and_enabled() {
+        let settings: GlobalSettings = serde_json::from_str(
+            r#"{"instances":[{"id":"studio","name":"Studio","host":"192.168.1.10"}]}"#,
+        )
+        .unwrap();
+        assert!(!settings.seeded);
+        assert!(settings.instances[0].enabled);
+        assert_eq!(settings.instances[0].port, 9910);
+    }
+
+    #[test]
+    fn merge_catalog_keeps_local_rows_and_seeds_once() {
+        let incoming = GlobalSettings::default();
+        let memory = vec![InstanceConfig::for_host("192.168.1.10")];
+        let (merged, changed) = merge_catalog(incoming, &memory, &["192.168.1.20".into()]);
+        assert!(changed);
+        assert!(merged.seeded);
+        assert_eq!(merged.instances.len(), 2);
+        assert_eq!(merged.instances[0].host, "192.168.1.10");
+        assert_eq!(merged.instances[1].id, "192.168.1.20");
+
+        let (again, changed) = merge_catalog(merged.clone(), &merged.instances, &[]);
+        assert!(!changed);
+        assert_eq!(again, merged);
     }
 }

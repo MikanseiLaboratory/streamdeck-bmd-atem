@@ -2,7 +2,7 @@
 
 Cross-platform Stream Deck plugin for **Blackmagic ATEM** control. Built with Rust.
 
-- **ATEM connection pool by IP** – one supervised session per switcher, shared by every key, with reconnect backoff.
+- **ATEM connection catalog** – switchers are stored in Stream Deck global settings. Each one keeps a supervised session with reconnect backoff, including after its keys leave the profile.
 - **Multiple dedicated actions** – Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, and downstream keyer controls.
 - **Typed Property Inspector** – one React inspector, generated from the Rust settings contract, sets the ATEM IP and the fields each action needs.
 - **Live state in PI** – ATEM connection status and input lists are pushed to the open inspector.
@@ -26,7 +26,7 @@ cd pi && npm install && npm run build
 2. Open the **Property Inspector** for that key.
 3. Set **ATEM IP** (e.g. `192.168.1.100`) and the action's bus (ME, AUX, or DSK).
 4. For **Program/Preview**, AUX, and DSK source actions, also set the **Video source**. Use one key per input you care about.
-5. The status line shows Connecting, the session error, or Connected. Connection state is sent to the PI by context.
+5. The IP is registered in the global switcher catalog. The status line shows Connecting, Disabled, the session error, or Connected, and the inspector lists every configured switcher. The session stays up when the key leaves the profile.
 6. Press the key to run the configured action on that ATEM.
 7. For Program/Preview actions, key colours follow the ATEM:
    - Program Input keys: active input = red, inactive = gray.

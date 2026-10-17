@@ -1,6 +1,6 @@
 import { usePluginMessage, useSendToPlugin, useSettings, useStreamDeck } from "@mikanseilaboratory/streamdeck-pi-client";
-import { useEffect, useState } from "react";
-import type { ActionSettings, AtemStateMessage, OptionsMessage, SelectItem } from "./generated/contracts";
+import { useEffect, useRef, useState } from "react";
+import type { ActionSettings, AtemStateMessage, InstanceStatusMessage, OptionsMessage, SelectItem, StatusMessage } from "./generated/contracts";
 
 const EMPTY_SETTINGS: ActionSettings = {
   atem_ip: null,
@@ -11,7 +11,7 @@ const EMPTY_SETTINGS: ActionSettings = {
   on_air: null,
 };
 
-type InspectorMessage = AtemStateMessage | OptionsMessage;
+type InspectorMessage = AtemStateMessage | OptionsMessage | StatusMessage;
 
 type NumberField = "me" | "video_source" | "aux_bus" | "key";
 
@@ -22,10 +22,13 @@ export function App() {
   const sendToPlugin = useSendToPlugin();
   const [connected, setConnected] = useState(false);
   const [detail, setDetail] = useState("");
+  const [instances, setInstances] = useState<InstanceStatusMessage[]>([]);
   const [options, setOptions] = useState<Record<string, SelectItem[]>>({});
+  const ipRef = useRef(settings.atem_ip);
+  ipRef.current = settings.atem_ip;
 
   usePluginMessage<InspectorMessage>((message) => {
-    if (message.type === "atemState") {
+    if (message.type === "atemState" && "connected" in message) {
       setConnected(message.connected);
       setDetail(message.detail);
     }
@@ -33,6 +36,15 @@ export function App() {
       setConnected(message.connected);
       setDetail(message.detail);
       setOptions((previous) => ({ ...previous, [message.kind]: message.items }));
+    }
+    if (message.type === "status" && "instances" in message) {
+      setInstances(message.instances);
+      const selected = (ipRef.current ?? "").trim();
+      const mine = message.instances.find((item) => item.host === selected);
+      if (mine) {
+        setConnected(mine.status === "Connected");
+        setDetail(mine.detail || mine.status);
+      }
     }
   });
 
@@ -128,6 +140,20 @@ export function App() {
           {connected ? "Connected to ATEM" : detail || "Not connected"}
         </div>
       </div>
+      {instances.length > 0 && (
+        <div className="sdpi-item">
+          <div className="sdpi-item-label">Switchers</div>
+          <div className="sdpi-item-value">
+            {instances.map((item) => (
+              <div key={item.id}>
+                {item.name} ({item.host}
+                {item.port === 9910 ? "" : `:${item.port}`}) — {item.status}
+                {item.detail && item.detail !== item.status ? `: ${item.detail}` : ""}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

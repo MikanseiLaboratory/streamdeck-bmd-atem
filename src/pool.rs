@@ -1,11 +1,11 @@
-//! One supervised ATEM session per switcher IP.
+//! One supervised ATEM session per configured switcher.
 //!
-//! Each address gets a supervisor task, matching the HyperDeck and vMix pools:
-//! `Connecting`, then `Connected`, or `Disconnected { message }` with exponential
-//! backoff. `AtemController::connect_udp` is called with `reconnect = false` so a
-//! dropped session is visible here instead of being retried inside necromancer.
+//! The catalog comes from Stream Deck global settings, matching the HyperDeck
+//! and vMix pools. A supervisor stays up while its instance remains configured.
+//! Removing a key does not drop the session. `AtemController::connect_udp` is
+//! called with `reconnect = false` so a dropped session is retried here.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,7 +16,8 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-const ATEM_PORT: u16 = 9910;
+/// ATEM control port used when an instance does not set one.
+pub const ATEM_PORT: u16 = 9910;
 
 /// How a supervisor waits between attempts.
 #[derive(Clone, Debug)]
@@ -44,9 +45,26 @@ impl PoolOptions {
     }
 }
 
+/// One switcher in the catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AtemInstanceConfig {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub enabled: bool,
+}
+
+impl AtemInstanceConfig {
+    fn endpoint_eq(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port && self.enabled == other.enabled
+    }
+}
+
 /// Live connection state of one switcher.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
+    Disabled,
     Connecting,
     Connected,
     Disconnected { message: String },
@@ -60,6 +78,7 @@ impl ConnectionStatus {
     /// Short label for logs and the property inspector.
     pub fn label(&self) -> &str {
         match self {
+            Self::Disabled => "Disabled",
             Self::Connecting => "Connecting",
             Self::Connected => "Connected",
             Self::Disconnected { .. } => "Disconnected",
@@ -69,6 +88,7 @@ impl ConnectionStatus {
     /// Inspector text. Empty once the session is up.
     pub fn detail(&self) -> String {
         match self {
+            Self::Disabled => "Disabled".to_string(),
             Self::Connecting => "Connecting".to_string(),
             Self::Connected => String::new(),
             Self::Disconnected { message } if message.is_empty() => "Disconnected".to_string(),
@@ -77,26 +97,41 @@ impl ConnectionStatus {
     }
 }
 
+/// Status row for one configured switcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceStatus {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub enabled: bool,
+    pub status: ConnectionStatus,
+}
+
 /// Something the pool wants the plugin to repaint or report.
 #[derive(Clone, Debug)]
 pub enum PoolEvent {
     /// Connection label changed.
-    Status { ip: String },
+    Status { id: String },
     /// Cached switcher state changed.
-    State { ip: String, updated: StateUpdate },
+    State { id: String, updated: StateUpdate },
 }
 
 struct Slot {
+    config: AtemInstanceConfig,
     cancel: CancellationToken,
+    generation: u64,
     status: ConnectionStatus,
     controller: Option<Arc<AtemController>>,
 }
 
 struct Inner {
     slots: HashMap<String, Slot>,
+    configs: Vec<AtemInstanceConfig>,
+    next_generation: u64,
 }
 
-/// Shared pool of ATEM sessions, keyed by switcher IP.
+/// Shared pool of ATEM sessions, keyed by instance id.
 #[derive(Clone)]
 pub struct AtemPool {
     inner: Arc<Mutex<Inner>>,
@@ -111,6 +146,8 @@ impl AtemPool {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 slots: HashMap::new(),
+                configs: Vec::new(),
+                next_generation: 1,
             })),
             events,
             options,
@@ -122,55 +159,172 @@ impl AtemPool {
         self.events.subscribe()
     }
 
-    /// Start, stop, and keep supervisors so they match `ips`.
+    /// Start, stop, and restart supervisors so they match `configs`.
     ///
-    /// Addresses that were already running are left in place. The returned list
-    /// is the addresses whose supervisors were cancelled.
-    pub async fn reconcile<I>(&self, ips: I) -> Vec<String>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let wanted: HashSet<String> = ips.into_iter().collect();
+    /// An unchanged host, port, and enabled flag keeps the running supervisor.
+    /// A disabled instance keeps a slot and does not open a socket. The returned
+    /// list is the instances whose supervisors were cancelled because they left
+    /// the catalog.
+    pub async fn reconcile(&self, configs: Vec<AtemInstanceConfig>) -> Vec<AtemInstanceConfig> {
+        let ordered = dedupe_configs(configs);
         let mut inner = self.inner.lock().await;
         let stale: Vec<String> = inner
             .slots
             .keys()
-            .filter(|ip| !wanted.contains(*ip))
+            .filter(|id| !ordered.iter().any(|config| config.id == **id))
             .cloned()
             .collect();
-        for ip in &stale {
-            if let Some(slot) = inner.slots.remove(ip) {
+        let mut removed = Vec::new();
+        for id in stale {
+            if let Some(slot) = inner.slots.remove(&id) {
                 slot.cancel.cancel();
+                removed.push(slot.config);
             }
         }
-        for ip in wanted {
-            if inner.slots.contains_key(&ip) {
+        for config in &ordered {
+            let same_endpoint = inner
+                .slots
+                .get(&config.id)
+                .is_some_and(|slot| slot.config.endpoint_eq(config));
+            if same_endpoint {
+                let Some(slot) = inner.slots.get_mut(&config.id) else {
+                    continue;
+                };
+                if slot.config.name != config.name {
+                    slot.config.name = config.name.clone();
+                    let _ = self.events.send(PoolEvent::Status {
+                        id: config.id.clone(),
+                    });
+                }
                 continue;
             }
-            inner.slots.insert(ip.clone(), self.spawn(ip));
+            if let Some(slot) = inner.slots.remove(&config.id) {
+                slot.cancel.cancel();
+            }
+            let generation = bump(&mut inner);
+            if !config.enabled {
+                inner
+                    .slots
+                    .insert(config.id.clone(), disabled_slot(config.clone(), generation));
+                let _ = self.events.send(PoolEvent::Status {
+                    id: config.id.clone(),
+                });
+                continue;
+            }
+            inner
+                .slots
+                .insert(config.id.clone(), self.spawn(config.clone(), generation));
         }
-        stale
+        inner.configs = ordered;
+        removed
     }
 
-    /// Connection label for one switcher.
-    pub async fn status(&self, ip: &str) -> Option<ConnectionStatus> {
+    /// Drop the current session and connect again.
+    pub async fn reconnect(&self, id: &str) {
+        let mut inner = self.inner.lock().await;
+        let Some(config) = inner.slots.get(id).map(|slot| slot.config.clone()) else {
+            return;
+        };
+        if !config.enabled {
+            return;
+        }
+        if let Some(slot) = inner.slots.remove(id) {
+            slot.cancel.cancel();
+        }
+        let generation = bump(&mut inner);
+        inner
+            .slots
+            .insert(config.id.clone(), self.spawn(config, generation));
+    }
+
+    /// Connection label for one instance.
+    pub async fn status(&self, id: &str) -> Option<ConnectionStatus> {
         self.inner
             .lock()
             .await
             .slots
-            .get(ip)
+            .get(id)
             .map(|slot| slot.status.clone())
     }
 
-    /// Controller for a switcher that has finished initialising.
-    pub async fn controller(&self, ip: &str) -> Option<Arc<AtemController>> {
+    /// Connection label for the instance that uses `host`.
+    ///
+    /// An enabled instance wins when several rows share the address.
+    pub async fn status_for_host(&self, host: &str) -> Option<ConnectionStatus> {
+        let host = host.trim();
         let inner = self.inner.lock().await;
-        let slot = inner.slots.get(ip)?;
+        let mut fallback = None;
+        for slot in inner.slots.values() {
+            if slot.config.host.trim() != host {
+                continue;
+            }
+            if slot.config.enabled {
+                return Some(slot.status.clone());
+            }
+            fallback = Some(slot.status.clone());
+        }
+        fallback
+    }
+
+    /// Catalog row for one instance.
+    pub async fn config(&self, id: &str) -> Option<AtemInstanceConfig> {
+        self.inner
+            .lock()
+            .await
+            .slots
+            .get(id)
+            .map(|slot| slot.config.clone())
+    }
+
+    /// Controller for an instance that has finished initialising.
+    pub async fn controller(&self, id: &str) -> Option<Arc<AtemController>> {
+        let inner = self.inner.lock().await;
+        let slot = inner.slots.get(id)?;
         if slot.status.is_connected() {
             slot.controller.clone()
         } else {
             None
         }
+    }
+
+    /// Controller for an enabled, connected instance on `host`.
+    pub async fn controller_for_host(&self, host: &str) -> Option<Arc<AtemController>> {
+        let host = host.trim();
+        let inner = self.inner.lock().await;
+        inner.slots.values().find_map(|slot| {
+            if slot.config.host.trim() == host && slot.config.enabled && slot.status.is_connected()
+            {
+                slot.controller.clone()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Status of every configured switcher, in catalog order.
+    pub async fn statuses(&self) -> Vec<InstanceStatus> {
+        let inner = self.inner.lock().await;
+        inner
+            .configs
+            .iter()
+            .map(|config| {
+                let status = inner
+                    .slots
+                    .get(&config.id)
+                    .map(|slot| slot.status.clone())
+                    .unwrap_or(ConnectionStatus::Disconnected {
+                        message: "missing".into(),
+                    });
+                InstanceStatus {
+                    id: config.id.clone(),
+                    name: config.name.clone(),
+                    host: config.host.clone(),
+                    port: config.port,
+                    enabled: config.enabled,
+                    status,
+                }
+            })
+            .collect()
     }
 
     /// Cancel every supervisor.
@@ -179,64 +333,122 @@ impl AtemPool {
         for (_, slot) in inner.slots.drain() {
             slot.cancel.cancel();
         }
+        inner.configs.clear();
     }
 
-    fn spawn(&self, ip: String) -> Slot {
+    fn spawn(&self, config: AtemInstanceConfig, generation: u64) -> Slot {
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let pool = self.clone();
         let options = self.options.clone();
+        let task_config = config.clone();
         tokio::spawn(async move {
-            supervise(ip, task_cancel, pool, options).await;
+            supervise(task_config, generation, task_cancel, pool, options).await;
         });
         Slot {
+            config,
             cancel,
+            generation,
             status: ConnectionStatus::Connecting,
             controller: None,
         }
     }
 }
 
+fn dedupe_configs(configs: Vec<AtemInstanceConfig>) -> Vec<AtemInstanceConfig> {
+    let mut ordered = Vec::new();
+    for config in configs {
+        if let Some(index) = ordered
+            .iter()
+            .position(|item: &AtemInstanceConfig| item.id == config.id)
+        {
+            ordered[index] = config;
+        } else {
+            ordered.push(config);
+        }
+    }
+    ordered
+}
+
+fn bump(inner: &mut Inner) -> u64 {
+    let generation = inner.next_generation;
+    inner.next_generation = inner.next_generation.wrapping_add(1);
+    generation
+}
+
+fn disabled_slot(config: AtemInstanceConfig, generation: u64) -> Slot {
+    Slot {
+        config,
+        cancel: CancellationToken::new(),
+        generation,
+        status: ConnectionStatus::Disabled,
+        controller: None,
+    }
+}
+
 async fn set_session(
     pool: &AtemPool,
-    ip: &str,
+    id: &str,
+    generation: u64,
     status: ConnectionStatus,
     controller: Option<Arc<AtemController>>,
-) {
+) -> bool {
     let mut inner = pool.inner.lock().await;
-    let Some(slot) = inner.slots.get_mut(ip) else {
-        return;
+    let Some(slot) = inner.slots.get_mut(id) else {
+        return false;
     };
+    if slot.generation != generation {
+        return false;
+    }
     slot.status = status;
     slot.controller = controller;
     drop(inner);
-    let _ = pool.events.send(PoolEvent::Status { ip: ip.to_string() });
+    let _ = pool.events.send(PoolEvent::Status { id: id.to_string() });
+    true
 }
 
-async fn supervise(ip: String, cancel: CancellationToken, pool: AtemPool, options: PoolOptions) {
+async fn supervise(
+    config: AtemInstanceConfig,
+    generation: u64,
+    cancel: CancellationToken,
+    pool: AtemPool,
+    options: PoolOptions,
+) {
     let mut backoff = options.initial_backoff;
     loop {
         if cancel.is_cancelled() {
             break;
         }
-        let address = match Ipv4Addr::from_str(&ip) {
+        let address = match Ipv4Addr::from_str(config.host.trim()) {
             Ok(address) => address,
             Err(error) => {
                 set_session(
                     &pool,
-                    &ip,
+                    &config.id,
+                    generation,
                     ConnectionStatus::Disconnected {
-                        message: format!("invalid ATEM IP {ip}: {error}"),
+                        message: format!("invalid ATEM IP {}: {error}", config.host),
                     },
                     None,
                 )
                 .await;
-                cancel.cancelled().await;
-                break;
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(options.max_backoff);
+                continue;
             }
         };
-        let socket = SocketAddrV4::new(address, ATEM_PORT);
-        set_session(&pool, &ip, ConnectionStatus::Connecting, None).await;
+        let socket = SocketAddrV4::new(address, config.port);
+        set_session(
+            &pool,
+            &config.id,
+            generation,
+            ConnectionStatus::Connecting,
+            None,
+        )
+        .await;
         tracing::info!("connecting to ATEM at {socket}");
         let connected = tokio::select! {
             biased;
@@ -247,21 +459,26 @@ async fn supervise(ip: String, cancel: CancellationToken, pool: AtemPool, option
         match connected {
             Ok(controller) => {
                 let controller = Arc::new(controller);
-                set_session(
+                if !set_session(
                     &pool,
-                    &ip,
+                    &config.id,
+                    generation,
                     ConnectionStatus::Connected,
                     Some(Arc::clone(&controller)),
                 )
-                .await;
-                let closed = watch_state(&ip, &controller, &cancel, &pool).await;
+                .await
+                {
+                    break;
+                }
+                let closed = watch_state(&config.id, &controller, &cancel, &pool).await;
                 drop(controller);
                 if !closed {
                     break;
                 }
                 set_session(
                     &pool,
-                    &ip,
+                    &config.id,
+                    generation,
                     ConnectionStatus::Disconnected {
                         message: "connection closed".to_string(),
                     },
@@ -271,10 +488,11 @@ async fn supervise(ip: String, cancel: CancellationToken, pool: AtemPool, option
                 backoff = options.initial_backoff;
             }
             Err(error) => {
-                tracing::warn!("ATEM session failed for {ip}: {error}");
+                tracing::warn!("ATEM session failed for {}: {error}", config.host);
                 set_session(
                     &pool,
-                    &ip,
+                    &config.id,
+                    generation,
                     ConnectionStatus::Disconnected {
                         message: error.to_string(),
                     },
@@ -296,7 +514,7 @@ async fn supervise(ip: String, cancel: CancellationToken, pool: AtemPool, option
 
 /// `true` when the session ended on its own. `false` when `cancel` fired.
 async fn watch_state(
-    ip: &str,
+    id: &str,
     controller: &AtemController,
     cancel: &CancellationToken,
     pool: &AtemPool,
@@ -310,7 +528,7 @@ async fn watch_state(
                 match update {
                     Ok((_txn, updated)) => {
                         let _ = pool.events.send(PoolEvent::State {
-                            ip: ip.to_string(),
+                            id: id.to_string(),
                             updated,
                         });
                     }
@@ -324,6 +542,29 @@ async fn watch_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg(id: &str, host: &str, enabled: bool) -> AtemInstanceConfig {
+        AtemInstanceConfig {
+            id: id.into(),
+            name: id.into(),
+            host: host.into(),
+            port: ATEM_PORT,
+            enabled,
+        }
+    }
+
+    async fn wait_disconnected(pool: &AtemPool, id: &str) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(ConnectionStatus::Disconnected { message }) = pool.status(id).await {
+                return message;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("status for {id}: {:?}", pool.status(id).await);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     #[test]
     fn protocol_2_32_is_accepted() {
@@ -359,38 +600,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_address_stays_disconnected_until_removed() {
-        let pool = AtemPool::new(PoolOptions::for_tests());
-        let mut events = pool.subscribe();
-        pool.reconcile(["999.1.1.1".to_string()]).await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Some(ConnectionStatus::Disconnected { message }) = pool.status("999.1.1.1").await
-            {
-                assert!(message.contains("invalid ATEM IP"), "{message}");
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("status: {:?}", pool.status("999.1.1.1").await);
-            }
-            let _ = tokio::time::timeout(Duration::from_millis(200), events.recv()).await;
-        }
-        assert!(pool.controller("999.1.1.1").await.is_none());
-        let mut removed = pool.reconcile(Vec::<String>::new()).await;
-        removed.sort();
-        assert_eq!(removed, vec!["999.1.1.1".to_string()]);
-        assert!(pool.status("999.1.1.1").await.is_none());
+    async fn invalid_address_retries_and_reconcile_keeps_the_supervisor() {
+        let pool = AtemPool::new(PoolOptions {
+            initial_backoff: Duration::from_secs(60),
+            max_backoff: Duration::from_secs(60),
+        });
+        pool.reconcile(vec![cfg("a", "999.1.1.1", true)]).await;
+        let message = wait_disconnected(&pool, "a").await;
+        assert!(message.contains("invalid ATEM IP"), "{message}");
+        assert!(pool.controller("a").await.is_none());
+        assert!(pool.controller_for_host("999.1.1.1").await.is_none());
+
+        pool.reconcile(vec![cfg("a", "999.1.1.1", true)]).await;
+        assert!(
+            matches!(
+                pool.status("a").await,
+                Some(ConnectionStatus::Disconnected { .. })
+            ),
+            "an unchanged config must not restart the supervisor: {:?}",
+            pool.status("a").await
+        );
+
+        let mut renamed = cfg("a", "999.1.1.1", true);
+        renamed.name = "Studio".into();
+        pool.reconcile(vec![renamed, cfg("b", "999.2.2.2", true)])
+            .await;
+        assert!(matches!(
+            pool.status("a").await,
+            Some(ConnectionStatus::Disconnected { .. })
+        ));
+        assert_eq!(pool.statuses().await[0].name, "Studio");
+        assert!(pool.status("b").await.is_some());
+
+        let removed = pool.reconcile(Vec::new()).await;
+        assert_eq!(removed.len(), 2);
+        assert!(pool.status("a").await.is_none());
+        assert!(pool.status("b").await.is_none());
     }
 
     #[tokio::test]
-    async fn reconcile_keeps_an_existing_supervisor() {
+    async fn disabled_instance_has_no_controller() {
         let pool = AtemPool::new(PoolOptions::for_tests());
-        pool.reconcile(["999.1.1.1".to_string()]).await;
-        let removed = pool
-            .reconcile(["999.1.1.1".to_string(), "999.2.2.2".to_string()])
-            .await;
-        assert!(removed.is_empty());
-        assert!(pool.status("999.1.1.1").await.is_some());
-        assert!(pool.status("999.2.2.2").await.is_some());
+        pool.reconcile(vec![cfg("a", "999.1.1.1", false)]).await;
+        assert_eq!(pool.status("a").await, Some(ConnectionStatus::Disabled));
+        assert!(pool.controller("a").await.is_none());
+        assert_eq!(
+            pool.status_for_host("999.1.1.1").await,
+            Some(ConnectionStatus::Disabled)
+        );
+
+        pool.reconcile(vec![cfg("a", "999.1.1.1", false)]).await;
+        assert_eq!(pool.status("a").await, Some(ConnectionStatus::Disabled));
+
+        pool.reconcile(vec![cfg("a", "999.1.1.1", true)]).await;
+        assert!(
+            matches!(
+                pool.status("a").await,
+                Some(ConnectionStatus::Connecting | ConnectionStatus::Disconnected { .. })
+            ),
+            "{:?}",
+            pool.status("a").await
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_the_host_ignores_the_previous_supervisor() {
+        let pool = AtemPool::new(PoolOptions::for_tests());
+        pool.reconcile(vec![cfg("a", "999.1.1.1", true)]).await;
+        let first = wait_disconnected(&pool, "a").await;
+        assert!(first.contains("999.1.1.1"), "{first}");
+
+        pool.reconcile(vec![cfg("a", "999.3.3.3", true)]).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let mut saw_new = false;
+        while tokio::time::Instant::now() < deadline {
+            match pool.status("a").await {
+                Some(ConnectionStatus::Disconnected { message }) => {
+                    assert!(
+                        message.contains("999.3.3.3"),
+                        "stale supervisor wrote {message}"
+                    );
+                    saw_new = true;
+                }
+                Some(ConnectionStatus::Connecting) => {}
+                other => panic!("unexpected status: {other:?}"),
+            }
+            sleep(Duration::from_millis(15)).await;
+        }
+        assert!(
+            saw_new,
+            "replacement supervisor never reported the new host"
+        );
+        assert!(pool.status("a").await.is_some());
     }
 }

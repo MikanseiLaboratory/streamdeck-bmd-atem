@@ -7,7 +7,7 @@ Key characteristics:
 - Uses [`necromancer`](https://github.com/Incomplete-Outputs-Lab/necromancer) (`feat/streamdeck`) for ATEM protocol and state management. `necromancer_protocol` is vendored in `third_party/necromancer_protocol` (upstream `fe286387`) so protocol 2.32 passes the firmware check. Upstream still rejects minor versions above 31.
 - Uses [`StreamDeckPluginRust`](https://github.com/MikanseiLaboratory/StreamDeckPluginRust) (`streamdeck-plugin`) for the Stream Deck WebSocket host, action registry, and TypeScript contract export.
 - The Property Inspector is a React app in `pi/`, built with [`@mikanseilaboratory/streamdeck-pi-client`](https://github.com/MikanseiLaboratory/streamdeck-pi-client). `cargo run --bin typegen` writes `pi/src/generated/contracts.ts`. Vite emits `dev.miseinul.atem.sdPlugin/ui/`.
-- Keeps one supervised ATEM session per IP (`src/pool.rs`), with the same connection states as the HyperDeck and vMix plugins: Connecting, Connected, or Disconnected with a message, and exponential backoff.
+- Keeps one supervised ATEM session per catalog entry (`src/pool.rs`), using the same connection system as the HyperDeck and vMix plugins: instances live in Stream Deck global settings, and each entry is Disabled, Connecting, Connected, or Disconnected with a message.
 - Pushes ATEM state (at least connectivity and bus selection) into the Property Inspector and uses it to drive key images.
 
 ## Actions and settings
@@ -38,12 +38,15 @@ The same struct is exported to TypeScript. The inspector shows only the fields t
 
 `AppState` (`src/runtime.rs`) owns:
 
-- an `AtemPool` (`src/pool.rs`): one supervisor per switcher IP
+- an `AtemPool` (`src/pool.rs`): one supervisor per catalog instance
 - the live key registry (context, action UUID, `ActionSettings`)
 - which inspector contexts are open, and which IP they watch
+- `GlobalSettings` (`instances`, `seeded`), applied from `didReceiveGlobalSettings`
 - the plugin `CommandSender`, captured in `PluginService::start`
 
-`reconcile` starts a supervisor for every IP used by a visible key or an open inspector, and cancels the rest. The supervisor calls `AtemController::connect_udp` on port 9910 with necromancer's own reconnect disabled, publishes `Connecting` / `Connected` / `Disconnected { message }`, and waits `1s`, `2s`, `4s`, … up to `30s` between failed attempts. Commands run only while the status is `Connected`. A background task applies pool state events to key images and open inspectors.
+`PluginService::start` asks Stream Deck for global settings. `GlobalHook` parses them and calls `AtemPool::reconcile`. The catalog is the source of truth: a supervisor stays up after its keys disappear, a disabled instance does not open a socket, and changing host, port, or `enabled` restarts that slot. A generation counter stops a replaced supervisor from writing status onto the new slot. The first settings read sets `seeded` and does not insert a localhost switcher.
+
+An action still selects one switcher with `atem_ip`. The first time that address is used, the plugin adds an enabled instance (`id` and `name` are the address, port `9910`) and writes it back with `setGlobalSettings`. Commands run only while that instance is `Connected`. The supervisor calls `AtemController::connect_udp` with necromancer's own reconnect disabled, including after an invalid address, and waits `1s`, `2s`, `4s`, … up to `30s` between attempts. A background task applies pool state events to key images and open inspectors.
 
 State updates still drive key images:
 
@@ -53,7 +56,7 @@ State updates still drive key images:
 
 Inspector messages use `type`:
 
-- plugin → inspector: `atemState` (`connected`, `detail`) and `options` (`kind`, `items`, `connected`, `detail`)
+- plugin → inspector: `atemState` (`connected`, `detail`), `status` (`instances`), and `options` (`kind`, `items`, `connected`, `detail`)
 - inspector → plugin: `requestOptions` (`kind` is `me`, `video`, `aux`, `auxVideo`, or `dsk`)
 
 ### Mapping actions to ATEM commands
