@@ -190,10 +190,19 @@ function InstanceCard({
         Port
         <input type="number" value={instance.port} onChange={(event) => onChange({ ...instance, port: Number(event.target.value) })} />
       </label>
-      <label className="field check">
-        <input type="checkbox" checked={instance.enabled} onChange={(event) => onChange({ ...instance, enabled: event.target.checked })} />
-        Enabled
-      </label>
+      <div className="sdpi-item" {...{ type: "checkbox" }}>
+        <div className="sdpi-item-label">Enabled</div>
+        <input
+          id={`enabled-${instance.id}`}
+          className="sdpi-item-value"
+          type="checkbox"
+          checked={instance.enabled}
+          onChange={(event) => onChange({ ...instance, enabled: event.target.checked })}
+        />
+        <label htmlFor={`enabled-${instance.id}`}>
+          <span></span>
+        </label>
+      </div>
       <div className="card-actions">
         <button type="button" onClick={onReconnect}>
           Reconnect
@@ -231,23 +240,38 @@ function Groups({
               }}
             />
           </label>
-          {instances.map((instance) => (
-            <label className="field check" key={instance.id}>
-              <input
-                type="checkbox"
-                checked={group.members.includes(instance.id)}
-                onChange={(event) => {
-                  const members = event.target.checked
-                    ? [...group.members, instance.id]
-                    : group.members.filter((id) => id !== instance.id);
-                  const copy = groups.slice();
-                  copy[index] = { ...group, members };
-                  setGroups(copy);
-                }}
-              />
-              {instance.name || instance.host}
-            </label>
-          ))}
+          <div className="sdpi-item targets" {...{ type: "checkbox" }}>
+            <div className="sdpi-item-label">Members</div>
+            <div className="sdpi-item-value">
+              {instances.length === 0 && <span>No switchers yet</span>}
+              {instances.map((instance) => {
+                const id = `group-${group.id}-${instance.id}`;
+                const on = group.members.includes(instance.id);
+                return (
+                  <div className="sdpi-item-child" key={instance.id}>
+                    <input
+                      id={id}
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => {
+                        const members = on
+                          ? group.members.filter((member) => member !== instance.id)
+                          : [...group.members, instance.id];
+                        const copy = groups.slice();
+                        copy[index] = { ...group, members };
+                        setGroups(copy);
+                      }}
+                    />
+                    <label htmlFor={id}>
+                      <span></span>
+                      <i className="swatch" style={{ background: instance.color }} />
+                      {instance.name || instance.host}
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
           <div className="card-actions">
             <button type="button" onClick={() => setGroups(groups.filter((_, item) => item !== index))}>
               Remove group

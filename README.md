@@ -24,7 +24,7 @@ cd pi && npm install && npm run build
 
 1. Add one of the **ATEM actions** (Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, DSK) to your Stream Deck profile.
 2. Open the **Property Inspector** for that key.
-3. Choose **Send to**: all enabled switchers, a group, or selected switchers. Open **Manage instances** to add switchers (name, host, port) and groups in a separate window.
+3. Choose **Send to**. The list contains every switcher and group, plus **Multiple switchers** when a key should hit more than one. Open **Manage instances** to add switchers (name, host, port) and groups in a separate window.
 4. For **Program/Preview**, AUX, and DSK source actions, also set the **Video source**. The list includes Black, color bars, and color generators. While the switcher is connected those rows, including their names, come from the ATEM. Use one key per input you care about.
 5. Each switcher shows Connecting, Disabled, Connected, or the session error in the configuration window. The session stays up when the key leaves the profile. A key saved with only an ATEM IP still talks to that address.
 6. Press the key to run the configured action on that ATEM.

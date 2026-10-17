@@ -230,7 +230,15 @@ function TargetPicker({
   value: TargetSelector;
   onChange: (value: TargetSelector) => void;
 }) {
-  const mode = value.kind === "group" ? "group" : value.kind === "instances" ? "instances" : "all";
+  const [preferMultiple, setPreferMultiple] = useState(value.kind === "instances" && value.ids.length !== 1);
+  useEffect(() => {
+    if (value.kind !== "instances") setPreferMultiple(false);
+  }, [value.kind]);
+  const mode = preferMultiple ? "multiple" : targetMode(value);
+  const selected = value.kind === "instances" ? value.ids : [];
+  const missingGroup = value.kind === "group" && !groups.some((group) => group.id === value.id);
+  const missingInstance =
+    value.kind === "instances" && value.ids.length === 1 && !instances.some((instance) => instance.id === value.ids[0]);
   return (
     <>
       <div className="sdpi-item">
@@ -240,61 +248,92 @@ function TargetPicker({
           value={mode}
           onChange={(event) => {
             const next = event.target.value;
-            if (next === "all") onChange({ kind: "all" });
-            if (next === "group") onChange({ kind: "group", id: groups[0]?.id ?? "" });
-            if (next === "instances") onChange({ kind: "instances", ids: instances[0] ? [instances[0].id] : [] });
+            setPreferMultiple(next === "multiple");
+            onChange(selectorFromMode(next, selected));
           }}
         >
           <option value="all">All enabled</option>
-          <option value="group">Group</option>
-          <option value="instances">Selected switchers</option>
+          {groups.map((group) => (
+            <option key={group.id} value={`group:${group.id}`}>
+              Group: {group.name || "Untitled"}
+            </option>
+          ))}
+          {missingGroup && value.kind === "group" && <option value={`group:${value.id}`}>Missing group</option>}
+          {instances.map((instance) => (
+            <option key={instance.id} value={`instance:${instance.id}`}>
+              {instance.name || instance.host}
+              {instance.enabled ? "" : " (disabled)"}
+            </option>
+          ))}
+          {missingInstance && value.kind === "instances" && (
+            <option value={`instance:${value.ids[0]}`}>Missing switcher</option>
+          )}
+          <option value="multiple">Multiple switchers</option>
         </select>
       </div>
-      {value.kind === "group" && (
-        <div className="sdpi-item">
-          <div className="sdpi-item-label">Group</div>
-          <select
-            className="sdpi-item-value select"
-            value={value.id}
-            onChange={(event) => onChange({ kind: "group", id: event.target.value })}
-          >
-            {groups.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name || group.id}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-      {value.kind === "instances" &&
-        instances.map((instance) => {
-          const status = statuses.find((item) => item.id === instance.id)?.status?.kind;
-          return (
-            <div className="sdpi-item" key={instance.id}>
-              <div className="sdpi-item-label">{status ?? ""}</div>
-              <div className="sdpi-item-value">
-                <span className="sdpi-item-child">
+      {mode === "multiple" && (
+        <div className="sdpi-item targets" {...{ type: "checkbox" }}>
+          <div className="sdpi-item-label">Switchers</div>
+          <div className="sdpi-item-value">
+            {instances.length === 0 && <span>No switchers yet</span>}
+            {instances.map((instance) => {
+              const id = `target-${instance.id}`;
+              const on = selected.includes(instance.id);
+              const status = statuses.find((item) => item.id === instance.id)?.status?.kind;
+              return (
+                <div className="sdpi-item-child" key={instance.id}>
                   <input
+                    id={id}
                     type="checkbox"
-                    checked={value.ids.includes(instance.id)}
-                    onChange={(event) => {
-                      const ids = event.target.checked
-                        ? [...value.ids, instance.id]
-                        : value.ids.filter((id) => id !== instance.id);
+                    checked={on}
+                    onChange={() => {
+                      const ids = on ? selected.filter((item) => item !== instance.id) : [...selected, instance.id];
                       onChange({ kind: "instances", ids });
                     }}
                   />
-                  <label>
-                    <span className="swatch" style={{ background: instance.color }} />
+                  <label htmlFor={id}>
+                    <span></span>
+                    <i className="swatch" style={{ background: statusColor(status, instance.color) }} />
                     {instance.name || instance.host}
                   </label>
-                </span>
-              </div>
-            </div>
-          );
-        })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </>
   );
+}
+
+function targetMode(value: TargetSelector): string {
+  if (value.kind === "all") return "all";
+  if (value.kind === "group") return `group:${value.id}`;
+  if (value.ids.length === 1) return `instance:${value.ids[0]}`;
+  return "multiple";
+}
+
+function selectorFromMode(mode: string, selected: string[]): TargetSelector {
+  if (mode === "all") return { kind: "all" };
+  if (mode === "multiple") return { kind: "instances", ids: selected };
+  if (mode.startsWith("group:")) return { kind: "group", id: mode.slice("group:".length) };
+  if (mode.startsWith("instance:")) return { kind: "instances", ids: [mode.slice("instance:".length)] };
+  return { kind: "all" };
+}
+
+function statusColor(kind: string | undefined, fallback: string): string {
+  switch (kind) {
+    case "connected":
+      return "#3cba7a";
+    case "connecting":
+      return "#e2b15a";
+    case "disconnected":
+      return "#8a4a3a";
+    case "disabled":
+      return "#6d7890";
+    default:
+      return fallback;
+  }
 }
 
 function shownTarget(settings: ActionSettings, instances: InstanceConfig[]): TargetSelector {
