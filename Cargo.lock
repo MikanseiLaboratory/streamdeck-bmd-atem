@@ -608,7 +608,6 @@ dependencies = [
 [[package]]
 name = "necromancer_protocol"
 version = "0.0.0"
-source = "git+https://github.com/Incomplete-Outputs-Lab/necromancer?branch=feat%2Fstreamdeck#fe28638751ac545740fe5dd371c2d88207846fcd"
 dependencies = [
  "binrw",
  "chrono",
@@ -965,6 +964,7 @@ dependencies = [
  "serde_json",
  "streamdeck-plugin",
  "tokio",
+ "tokio-util",
  "tracing",
  "ts-rs",
 ]

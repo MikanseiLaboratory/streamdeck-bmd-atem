@@ -21,14 +21,17 @@ export function App() {
   const { settings, setSettings } = useSettings<ActionSettings>(EMPTY_SETTINGS);
   const sendToPlugin = useSendToPlugin();
   const [connected, setConnected] = useState(false);
+  const [detail, setDetail] = useState("");
   const [options, setOptions] = useState<Record<string, SelectItem[]>>({});
 
   usePluginMessage<InspectorMessage>((message) => {
     if (message.type === "atemState") {
       setConnected(message.connected);
+      setDetail(message.detail);
     }
     if (message.type === "options" && "items" in message) {
       setConnected(message.connected);
+      setDetail(message.detail);
       setOptions((previous) => ({ ...previous, [message.kind]: message.items }));
     }
   });
@@ -122,7 +125,7 @@ export function App() {
       <div className="sdpi-item">
         <div className="sdpi-item-label">Connection</div>
         <div className={`sdpi-item-value ${connected ? "status-connected" : "status-disconnected"}`}>
-          {connected ? "Connected to ATEM" : "Not connected"}
+          {connected ? "Connected to ATEM" : detail || "Not connected"}
         </div>
       </div>
     </div>

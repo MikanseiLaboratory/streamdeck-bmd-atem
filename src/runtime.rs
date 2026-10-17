@@ -1,26 +1,25 @@
 //! Shared ATEM connections, key tallies, and Property Inspector updates.
 //!
-//! One [`AtemController`] is cached per switcher IP. Background tasks push bus
-//! changes into key images and into any open inspector for that address.
+//! [`AtemPool`] keeps one supervisor per switcher IP. Status and state events
+//! from that pool drive key images and any open inspector for the address.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::str::FromStr;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use necromancer::protocol::structs::VideoSource;
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
 use serde_json::Value;
 use streamdeck_plugin::{async_trait, CommandSender, PluginService, Result, Target};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::contracts::{
     cycle_index, normalized_ip, ActionSettings, AtemStateMessage, InspectorCommand, OptionsMessage,
     SelectItem,
 };
+use crate::pool::{AtemPool, ConnectionStatus, PoolEvent, PoolOptions};
 
-const ATEM_PORT: u16 = 9910;
 const IMAGE_RED: &str = "Images/red.png";
 const IMAGE_GREEN: &str = "Images/green.png";
 const IMAGE_GRAY: &str = "Images/gray.png";
@@ -42,12 +41,6 @@ struct KeyRecord {
     settings: ActionSettings,
 }
 
-struct LiveAtem {
-    controller: Arc<AtemController>,
-    /// Dropping this sender ends the forward task and releases the socket.
-    _stop: mpsc::UnboundedSender<()>,
-}
-
 /// Plugin-wide state passed to every action.
 #[derive(Clone)]
 pub struct AppState {
@@ -57,35 +50,36 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            runtime: Arc::new_cyclic(|weak| Runtime {
-                this: weak.clone(),
-                connections: RwLock::new(HashMap::new()),
+            runtime: Arc::new(Runtime {
+                pool: AtemPool::new(PoolOptions::default()),
                 keys: RwLock::new(HashMap::new()),
                 inspectors: RwLock::new(HashMap::new()),
                 sender: Mutex::new(None),
+                listener_started: AtomicBool::new(false),
             }),
         }
     }
 }
 
 struct Runtime {
-    this: Weak<Runtime>,
-    connections: RwLock<HashMap<String, LiveAtem>>,
+    pool: AtemPool,
     keys: RwLock<HashMap<String, KeyRecord>>,
     /// Inspector contexts currently visible, mapped to the ATEM IP they watch.
     inspectors: RwLock<HashMap<String, Option<String>>>,
     sender: Mutex<Option<CommandSender>>,
+    listener_started: AtomicBool,
 }
 
 #[async_trait]
 impl PluginService for AppState {
     async fn start(&self, sender: CommandSender) -> Result<()> {
         *self.runtime.sender.lock().await = Some(sender);
+        self.runtime.spawn_listener();
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.runtime.connections.write().await.clear();
+        self.runtime.pool.shutdown().await;
         Ok(())
     }
 }
@@ -95,7 +89,7 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        self.runtime.ensure_connected(settings).await;
+        self.runtime.reconcile_all().await;
         if let Some(ip) = normalized_ip(settings) {
             self.runtime.refresh_ip(&ip).await;
         }
@@ -104,7 +98,7 @@ impl AppState {
     pub async fn on_will_disappear(&self, context: &str) {
         self.runtime.keys.write().await.remove(context);
         self.runtime.inspectors.write().await.remove(context);
-        self.runtime.evict_unused().await;
+        self.runtime.reconcile_all().await;
     }
 
     pub async fn on_settings_changed(
@@ -116,8 +110,7 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        self.runtime.evict_unused().await;
-        self.runtime.ensure_connected(settings).await;
+        self.runtime.reconcile_all().await;
         if let Some(ip) = normalized_ip(settings) {
             self.runtime.refresh_ip(&ip).await;
         }
@@ -142,12 +135,13 @@ impl AppState {
             .write()
             .await
             .insert(context.to_string(), normalized_ip(settings));
-        self.runtime.ensure_connected(settings).await;
+        self.runtime.reconcile_all().await;
         self.push_inspector(action, context, settings).await;
     }
 
     pub async fn on_property_inspector_did_disappear(&self, context: &str) {
         self.runtime.inspectors.write().await.remove(context);
+        self.runtime.reconcile_all().await;
     }
 
     pub async fn on_property_inspector_message(&self, context: &str, payload: &Value) {
@@ -172,16 +166,23 @@ impl AppState {
         {
             settings.atem_ip = Some(ip);
         }
-        self.runtime.ensure_connected(&settings).await;
-        let connected = self
+        if self.runtime.inspectors.read().await.contains_key(context) {
+            self.runtime
+                .inspectors
+                .write()
+                .await
+                .insert(context.to_string(), normalized_ip(&settings));
+        }
+        self.runtime.reconcile_all().await;
+        let (connected, detail) = self
             .runtime
-            .is_connected(normalized_ip(&settings).as_deref())
+            .connection_view(normalized_ip(&settings).as_deref())
             .await;
         let items = self.runtime.options(&command.kind, &settings).await;
         self.runtime
             .send_pi(
                 context,
-                &OptionsMessage::new(command.kind, items, connected),
+                &OptionsMessage::new(command.kind, items, connected, detail),
             )
             .await;
     }
@@ -360,32 +361,40 @@ impl AppState {
             }
             return None;
         };
-        match self.runtime.connect(&ip).await {
-            Ok(controller) => Some(controller),
-            Err(error) => {
-                self.runtime
-                    .log(&format!("failed to connect to ATEM {ip}: {error}"))
-                    .await;
-                if alert {
-                    self.runtime.show_alert(context).await;
-                }
-                None
-            }
+        if let Some(controller) = self.runtime.pool.controller(&ip).await {
+            return Some(controller);
         }
+        self.runtime.reconcile_all().await;
+        let (_, detail) = self.runtime.connection_view(Some(&ip)).await;
+        let detail = if detail.is_empty() {
+            "not connected".to_string()
+        } else {
+            detail
+        };
+        self.runtime
+            .log(&format!("ATEM {ip} is not ready: {detail}"))
+            .await;
+        if alert {
+            self.runtime.show_alert(context).await;
+        }
+        None
     }
 
     async fn push_inspector(&self, action: &str, context: &str, settings: &ActionSettings) {
-        let connected = self
+        let (connected, detail) = self
             .runtime
-            .is_connected(normalized_ip(settings).as_deref())
+            .connection_view(normalized_ip(settings).as_deref())
             .await;
         self.runtime
-            .send_pi(context, &AtemStateMessage::new(connected))
+            .send_pi(context, &AtemStateMessage::new(connected, &detail))
             .await;
         for kind in option_kinds(action) {
             let items = self.runtime.options(kind, settings).await;
             self.runtime
-                .send_pi(context, &OptionsMessage::new(*kind, items, connected))
+                .send_pi(
+                    context,
+                    &OptionsMessage::new(*kind, items, connected, &detail),
+                )
                 .await;
         }
     }
@@ -420,78 +429,80 @@ impl Runtime {
         );
     }
 
-    async fn ensure_connected(&self, settings: &ActionSettings) {
-        let Some(ip) = normalized_ip(settings) else {
+    fn spawn_listener(self: &Arc<Self>) {
+        if self.listener_started.swap(true, Ordering::SeqCst) {
             return;
-        };
-        if let Err(error) = self.connect(&ip).await {
-            self.log(&format!("failed to connect to ATEM {ip}: {error}"))
-                .await;
         }
-    }
-
-    async fn connect(&self, ip: &str) -> std::result::Result<Arc<AtemController>, String> {
-        if let Some(live) = self.connections.read().await.get(ip) {
-            return Ok(Arc::clone(&live.controller));
-        }
-        let address =
-            Ipv4Addr::from_str(ip).map_err(|error| format!("invalid ATEM IP {ip:?}: {error}"))?;
-        let socket = SocketAddrV4::new(address, ATEM_PORT);
-        self.log(&format!("connecting to ATEM at {socket}")).await;
-        let controller = AtemController::connect_udp(socket, true)
-            .await
-            .map_err(|error| error.to_string())?;
-        let controller = Arc::new(controller);
-        let (stop_tx, stop_rx) = mpsc::unbounded_channel();
-        {
-            let mut guard = self.connections.write().await;
-            if let Some(live) = guard.get(ip) {
-                return Ok(Arc::clone(&live.controller));
-            }
-            guard.insert(
-                ip.to_string(),
-                LiveAtem {
-                    controller: Arc::clone(&controller),
-                    _stop: stop_tx,
-                },
-            );
-        }
-        let runtime = self
-            .this
-            .upgrade()
-            .ok_or_else(|| "ATEM runtime has been dropped".to_string())?;
-        let ip_owned = ip.to_string();
-        let forwarded = Arc::clone(&controller);
+        let runtime = Arc::clone(self);
+        let mut events = self.pool.subscribe();
         tokio::spawn(async move {
-            runtime.forward(ip_owned, forwarded, stop_rx).await;
-        });
-        Ok(controller)
-    }
-
-    async fn forward(
-        &self,
-        ip: String,
-        controller: Arc<AtemController>,
-        mut stop_rx: mpsc::UnboundedReceiver<()>,
-    ) {
-        let mut updates = controller.state_update_events();
-        loop {
-            tokio::select! {
-                biased;
-                _ = stop_rx.recv() => break,
-                update = updates.recv() => {
-                    let Ok((_txn, updated)) = update else {
-                        self.on_disconnected(&ip, &controller).await;
-                        break;
-                    };
-                    self.on_state(&ip, &controller, updated).await;
+            loop {
+                match events.recv().await {
+                    Ok(PoolEvent::Status { ip }) => runtime.on_pool_status(&ip).await,
+                    Ok(PoolEvent::State { ip, updated }) => {
+                        let Some(controller) = runtime.pool.controller(&ip).await else {
+                            continue;
+                        };
+                        runtime.on_state(&ip, &controller, updated).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        runtime.refresh_connected().await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+        });
+    }
+
+    async fn reconcile_all(&self) {
+        let wanted = self.wanted_ips().await;
+        let removed = self.pool.reconcile(wanted).await;
+        for ip in removed {
+            self.notify_ip(&ip, false, "Disconnected").await;
+        }
+    }
+
+    async fn wanted_ips(&self) -> HashSet<String> {
+        let mut ips = HashSet::new();
+        for record in self.keys.read().await.values() {
+            if let Some(ip) = normalized_ip(&record.settings) {
+                ips.insert(ip);
+            }
+        }
+        for watched in self.inspectors.read().await.values() {
+            if let Some(ip) = watched.clone() {
+                ips.insert(ip);
+            }
+        }
+        ips
+    }
+
+    async fn on_pool_status(&self, ip: &str) {
+        let Some(status) = self.pool.status(ip).await else {
+            return;
+        };
+        let connected = status.is_connected();
+        let detail = status.detail();
+        match &status {
+            ConnectionStatus::Connected => {
+                self.log(&format!("ATEM {ip} connected")).await;
+            }
+            ConnectionStatus::Connecting => {
+                self.log(&format!("ATEM {ip} connecting")).await;
+            }
+            ConnectionStatus::Disconnected { message } => {
+                self.log(&format!("ATEM {ip} disconnected: {message}"))
+                    .await;
+            }
+        }
+        self.notify_ip(ip, connected, &detail).await;
+        if connected {
+            self.refresh_ip(ip).await;
+            self.push_options_for_ip(ip, &detail).await;
         }
     }
 
     async fn on_state(&self, ip: &str, controller: &AtemController, updated: StateUpdate) {
-        self.notify_connected(ip, true).await;
         if updated.intersects(StateUpdate::PREVIEW_OR_PROGRAM_SOURCE) {
             let state = controller.get_state().await;
             if updated.intersects(StateUpdate::PROGRAM_SOURCE) {
@@ -512,20 +523,7 @@ impl Runtime {
         }
     }
 
-    async fn on_disconnected(&self, ip: &str, controller: &Arc<AtemController>) {
-        let mut guard = self.connections.write().await;
-        if guard
-            .get(ip)
-            .is_some_and(|live| Arc::ptr_eq(&live.controller, controller))
-        {
-            guard.remove(ip);
-        }
-        drop(guard);
-        self.log(&format!("ATEM connection closed for {ip}")).await;
-        self.notify_connected(ip, false).await;
-    }
-
-    async fn notify_connected(&self, ip: &str, connected: bool) {
+    async fn notify_ip(&self, ip: &str, connected: bool, detail: &str) {
         let contexts: Vec<String> = self
             .inspectors
             .read()
@@ -534,20 +532,64 @@ impl Runtime {
             .filter(|(_, watched)| watched.as_deref() == Some(ip))
             .map(|(context, _)| context.clone())
             .collect();
-        let message = AtemStateMessage::new(connected);
+        let message = AtemStateMessage::new(connected, detail);
         for context in contexts {
             self.send_pi(&context, &message).await;
         }
     }
 
+    async fn push_options_for_ip(&self, ip: &str, detail: &str) {
+        let open: Vec<(String, String, ActionSettings)> = {
+            let keys = self.keys.read().await;
+            let inspectors = self.inspectors.read().await;
+            inspectors
+                .iter()
+                .filter(|(_, watched)| watched.as_deref() == Some(ip))
+                .filter_map(|(context, _)| {
+                    let record = keys.get(context)?;
+                    Some((
+                        context.clone(),
+                        record.action.clone(),
+                        record.settings.clone(),
+                    ))
+                })
+                .collect()
+        };
+        for (context, action, settings) in open {
+            for kind in option_kinds(&action) {
+                let items = self.options(kind, &settings).await;
+                self.send_pi(&context, &OptionsMessage::new(*kind, items, true, detail))
+                    .await;
+            }
+        }
+    }
+
+    async fn connection_view(&self, ip: Option<&str>) -> (bool, String) {
+        let Some(ip) = ip else {
+            return (false, String::new());
+        };
+        match self.pool.status(ip).await {
+            Some(status) => (status.is_connected(), status.detail()),
+            None => (false, String::new()),
+        }
+    }
+
+    async fn refresh_connected(&self) {
+        let ips: Vec<String> = self.wanted_ips().await.into_iter().collect();
+        for ip in ips {
+            if self
+                .pool
+                .status(&ip)
+                .await
+                .is_some_and(|status| status.is_connected())
+            {
+                self.refresh_ip(&ip).await;
+            }
+        }
+    }
+
     async fn refresh_ip(&self, ip: &str) {
-        let Some(controller) = self
-            .connections
-            .read()
-            .await
-            .get(ip)
-            .map(|live| Arc::clone(&live.controller))
-        else {
+        let Some(controller) = self.pool.controller(ip).await else {
             return;
         };
         let state = controller.get_state().await;
@@ -627,46 +669,9 @@ impl Runtime {
             .collect()
     }
 
-    async fn evict_unused(&self) {
-        let used: HashSet<String> = self
-            .keys
-            .read()
-            .await
-            .values()
-            .filter_map(|record| normalized_ip(&record.settings))
-            .collect();
-        let removed = {
-            let mut guard = self.connections.write().await;
-            let stale: Vec<String> = guard
-                .keys()
-                .filter(|ip| !used.contains(*ip))
-                .cloned()
-                .collect();
-            for ip in &stale {
-                guard.remove(ip);
-            }
-            stale
-        };
-        for ip in removed {
-            self.notify_connected(&ip, false).await;
-        }
-    }
-
-    async fn is_connected(&self, ip: Option<&str>) -> bool {
-        let Some(ip) = ip else {
-            return false;
-        };
-        self.connections.read().await.contains_key(ip)
-    }
-
     async fn options(&self, kind: &str, settings: &ActionSettings) -> Vec<SelectItem> {
         let controller = match normalized_ip(settings) {
-            Some(ip) => self
-                .connections
-                .read()
-                .await
-                .get(&ip)
-                .map(|live| Arc::clone(&live.controller)),
+            Some(ip) => self.pool.controller(&ip).await,
             None => None,
         };
         let state;

@@ -5,4 +5,5 @@
 
 pub mod actions;
 pub mod contracts;
+pub mod pool;
 pub mod runtime;

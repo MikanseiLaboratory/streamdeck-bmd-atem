@@ -14,10 +14,10 @@ macro_rules! define_action {
         pub struct $name;
 
         #[streamdeck_plugin::streamdeck_action(
-                                            uuid = $uuid,
-                                            settings = crate::contracts::ActionSettings,
-                                            state = crate::runtime::AppState,
-                                        )]
+                                                    uuid = $uuid,
+                                                    settings = crate::contracts::ActionSettings,
+                                                    state = crate::runtime::AppState,
+                                                )]
         impl streamdeck_plugin::Action for $name {
             async fn on_will_appear(
                 &mut self,

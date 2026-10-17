@@ -54,6 +54,7 @@ pub struct AtemStateMessage {
     #[serde(rename = "type")]
     pub r#type: String,
     pub connected: bool,
+    pub detail: String,
 }
 
 /// `sendToPropertyInspector` payload with dynamic select options.
@@ -64,6 +65,7 @@ pub struct OptionsMessage {
     pub kind: String,
     pub items: Vec<SelectItem>,
     pub connected: bool,
+    pub detail: String,
 }
 
 /// `sendToPlugin` payload from the inspector.
@@ -87,21 +89,28 @@ export_ts!(OptionsMessage);
 export_ts!(InspectorCommand);
 
 impl AtemStateMessage {
-    pub fn new(connected: bool) -> Self {
+    pub fn new(connected: bool, detail: impl Into<String>) -> Self {
         Self {
             r#type: "atemState".into(),
             connected,
+            detail: detail.into(),
         }
     }
 }
 
 impl OptionsMessage {
-    pub fn new(kind: impl Into<String>, items: Vec<SelectItem>, connected: bool) -> Self {
+    pub fn new(
+        kind: impl Into<String>,
+        items: Vec<SelectItem>,
+        connected: bool,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             r#type: "options".into(),
             kind: kind.into(),
             items,
             connected,
+            detail: detail.into(),
         }
     }
 }

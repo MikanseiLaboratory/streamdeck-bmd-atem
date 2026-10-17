@@ -2,9 +2,9 @@
 
 export type InspectorCommand = { type: string, kind: string, atem_ip: string | null, };
 
-export type OptionsMessage = { type: string, kind: string, items: Array<SelectItem>, connected: boolean, };
+export type OptionsMessage = { type: string, kind: string, items: Array<SelectItem>, connected: boolean, detail: string, };
 
-export type AtemStateMessage = { type: string, connected: boolean, };
+export type AtemStateMessage = { type: string, connected: boolean, detail: string, };
 
 export type SelectItem = { label: string, value: string, };
 
