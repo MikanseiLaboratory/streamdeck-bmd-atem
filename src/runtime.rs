@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use necromancer::protocol::structs::VideoSource;
+use necromancer::protocol::atom::InputProperties;
+use necromancer::protocol::structs::{PortType, VideoSource};
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
 use serde_json::Value;
@@ -749,6 +750,9 @@ impl Runtime {
             self.refresh_dsk_on_air(ip, &state).await;
             self.refresh_dsk_auto(ip, &state).await;
         }
+        if updated.intersects(StateUpdate::INPUT_PROPERTIES) {
+            self.push_options_for_ip(ip, "").await;
+        }
     }
 
     async fn notify_ip(&self, ip: &str, connected: bool, detail: &str) {
@@ -1031,16 +1035,99 @@ fn me_items(state: Option<&AtemState>) -> Vec<SelectItem> {
 }
 
 fn video_items(state: Option<&AtemState>) -> Vec<SelectItem> {
-    let mut ids = input_ids(state);
-    if ids.is_empty() {
-        ids = (1..=20).collect();
-    }
-    ids.into_iter()
-        .map(|id| SelectItem {
-            label: format!("Input {id}"),
+    let Some(state) = state.filter(|state| !state.input_properties.is_empty()) else {
+        return fallback_video_items();
+    };
+    listed_sources(&state.input_properties)
+}
+
+fn listed_sources<'a>(
+    properties: impl IntoIterator<Item = (&'a VideoSource, &'a InputProperties)>,
+) -> Vec<SelectItem> {
+    let mut rows: Vec<(u16, String)> = properties
+        .into_iter()
+        .filter(|(_, properties)| selectable_port(properties.port_type))
+        .map(|(source, properties)| {
+            let id = *source as u16;
+            (id, source_label(id, properties))
+        })
+        .collect();
+    rows.sort_by_key(|(id, _)| source_rank(*id));
+    rows.into_iter()
+        .map(|(id, label)| SelectItem {
+            label,
             value: id.to_string(),
         })
         .collect()
+}
+
+fn fallback_video_items() -> Vec<SelectItem> {
+    let mut items = vec![
+        SelectItem {
+            label: "Black".into(),
+            value: (VideoSource::Black as u16).to_string(),
+        },
+        SelectItem {
+            label: "Color Bars".into(),
+            value: (VideoSource::ColourBars as u16).to_string(),
+        },
+        SelectItem {
+            label: "Color 1".into(),
+            value: (VideoSource::Colour1 as u16).to_string(),
+        },
+        SelectItem {
+            label: "Color 2".into(),
+            value: (VideoSource::Colour2 as u16).to_string(),
+        },
+    ];
+    items.extend((1..=20).map(|id| SelectItem {
+        label: format!("Input {id}"),
+        value: id.to_string(),
+    }));
+    items
+}
+
+fn selectable_port(port: PortType) -> bool {
+    matches!(
+        port,
+        PortType::External | PortType::Black | PortType::ColourBars | PortType::ColourGenerator
+    )
+}
+
+fn source_label(id: u16, properties: &InputProperties) -> String {
+    properties
+        .get_long_name()
+        .ok()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_source_label(id))
+}
+
+fn fallback_source_label(id: u16) -> String {
+    match VideoSource::from_u16(id) {
+        Some(VideoSource::Black) => "Black".into(),
+        Some(VideoSource::ColourBars) => "Color Bars".into(),
+        Some(VideoSource::Colour1) => "Color 1".into(),
+        Some(VideoSource::Colour2) => "Color 2".into(),
+        Some(VideoSource::Colour3) => "Color 3".into(),
+        Some(VideoSource::Colour4) => "Color 4".into(),
+        Some(VideoSource::Colour5) => "Color 5".into(),
+        Some(VideoSource::Colour6) => "Color 6".into(),
+        Some(VideoSource::Colour7) => "Color 7".into(),
+        Some(VideoSource::Colour8) => "Color 8".into(),
+        _ => format!("Input {id}"),
+    }
+}
+
+fn source_rank(id: u16) -> u32 {
+    match id {
+        0 => 0,
+        1000 => 1,
+        2001..=2008 => 10 + u32::from(id - 2000),
+        1..=40 => 100 + u32::from(id),
+        _ => 10_000 + u32::from(id),
+    }
 }
 
 fn aux_items(state: Option<&AtemState>) -> Vec<SelectItem> {
@@ -1089,20 +1176,10 @@ fn dsk_items(state: Option<&AtemState>) -> Vec<SelectItem> {
 }
 
 fn input_ids(state: Option<&AtemState>) -> Vec<u16> {
-    let Some(state) = state else {
-        return Vec::new();
-    };
-    let mut ids: Vec<u16> = state
-        .input_properties
-        .keys()
-        .filter_map(|source| {
-            let id = *source as u16;
-            (1..=40).contains(&id).then_some(id)
-        })
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids
+    video_items(state)
+        .into_iter()
+        .filter_map(|item| item.value.parse().ok())
+        .collect()
 }
 
 fn aux_source_ids(state: &AtemState) -> Vec<u16> {
@@ -1119,4 +1196,65 @@ fn aux_source_ids(state: &AtemState) -> Vec<u16> {
         ids.extend([10010, 10011, 10020, 10021]);
     }
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use necromancer::protocol::structs::ExternalPortType;
+
+    use super::*;
+
+    fn properties(port: PortType, name: &str) -> InputProperties {
+        let mut long_name = [0u8; 20];
+        let bytes = name.as_bytes();
+        long_name[..bytes.len()].copy_from_slice(bytes);
+        InputProperties {
+            video_source: VideoSource::Black,
+            long_name,
+            short_name: [0; 4],
+            input_names_are_default: true,
+            available_external_port_types: ExternalPortType::default(),
+            external_port_type: ExternalPortType::default(),
+            port_type: port,
+            availability3: 0,
+        }
+    }
+
+    #[test]
+    fn disconnected_source_list_includes_black_and_color() {
+        let items = video_items(None);
+        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+        assert!(values.contains(&"0"), "Black");
+        assert!(values.contains(&"1000"), "Color Bars");
+        assert!(values.contains(&"2001"), "Color 1");
+        assert!(values.contains(&"2002"), "Color 2");
+        assert!(values.contains(&"1"));
+        assert_eq!(items[0].label, "Black");
+        assert_eq!(items[1].label, "Color Bars");
+    }
+
+    #[test]
+    fn connected_source_list_uses_switcher_names_and_skips_other_ports() {
+        let mut input_properties = HashMap::new();
+        input_properties.insert(VideoSource::Input3, properties(PortType::External, "Cam 3"));
+        input_properties.insert(VideoSource::Black, properties(PortType::Black, "Black"));
+        input_properties.insert(
+            VideoSource::ColourBars,
+            properties(PortType::ColourBars, "Color Bars"),
+        );
+        input_properties.insert(
+            VideoSource::Colour1,
+            properties(PortType::ColourGenerator, "Color 1"),
+        );
+        input_properties.insert(
+            VideoSource::MediaPlayer1,
+            properties(PortType::MediaPlayerFill, "Media 1"),
+        );
+        let items = listed_sources(&input_properties);
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["Black", "Color Bars", "Color 1", "Cam 3"]);
+        assert_eq!(items[3].value, "3");
+    }
 }

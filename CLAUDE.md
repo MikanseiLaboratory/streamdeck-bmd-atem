@@ -88,7 +88,7 @@ A successful Auto or DSK Auto press paints that key red immediately. The next ma
 
 `manifest.json` sets `PropertyInspectorPath` to `ui/index.html`. That bundle is the Vite build of `pi/`. One page serves every action and chooses fields from `actionInfo.action`.
 
-Settings round-trip through `useSettings`. The target picker and **Manage instances** button follow the HyperDeck, vMix, and OBS inspectors: the button opens `ui/configuration.html`, which talks to the inspector through `window.atemConfig`. Dynamic lists are not sdpi-components datasources anymore: the page sends `requestOptions`, and the plugin answers with the current ATEM topology (or a fallback list when the switcher is not connected yet).
+Settings round-trip through `useSettings`. The target picker and **Manage instances** button follow the HyperDeck, vMix, and OBS inspectors: the button opens `ui/configuration.html`, which talks to the inspector through `window.atemConfig`. Dynamic lists are not sdpi-components datasources anymore: the page sends `requestOptions`, and the plugin answers with the current ATEM topology (or a fallback list when the switcher is not connected yet). Program, Preview, AUX, and DSK source lists include Black, color bars, and color generators. A connected switcher supplies those rows from its input properties, including the names stored on the ATEM.
 
 ## Notes for future work
 
