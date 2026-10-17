@@ -14,6 +14,7 @@ use ts_rs::TS;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, TS)]
 pub struct ActionSettings {
     pub atem_ip: Option<String>,
+    pub target: Option<TargetSelector>,
     pub me: Option<u8>,
     pub video_source: Option<u16>,
     pub aux_bus: Option<u8>,
@@ -32,6 +33,7 @@ impl<'de> Deserialize<'de> for ActionSettings {
         };
         Ok(Self {
             atem_ip: read_string(map.get("atem_ip")),
+            target: read_target(map.get("target")),
             me: read_num(map.get("me")),
             video_source: read_num(map.get("video_source")),
             aux_bus: read_num(map.get("aux_bus")),
@@ -80,6 +82,10 @@ pub struct InspectorCommand {
     pub kind: String,
     #[serde(default)]
     pub atem_ip: Option<String>,
+    #[serde(default)]
+    pub target: Option<TargetSelector>,
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// One switcher stored in Stream Deck global settings.
@@ -90,8 +96,40 @@ pub struct InstanceConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_color")]
+    pub color: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// A named set of switcher ids.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TargetGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// Which configured switchers an action talks to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum TargetSelector {
+    All,
+    Group { id: String },
+    Instances { ids: Vec<String> },
+}
+
+/// Connection label pushed to the property inspector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectionState {
+    Disabled,
+    Connecting,
+    Connected,
+    Disconnected { message: String },
 }
 
 fn default_port() -> u16 {
@@ -102,6 +140,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_color() -> String {
+    "#4c8dff".into()
+}
+
 impl InstanceConfig {
     /// Catalog row created from an action's ATEM address.
     pub fn for_host(host: &str) -> Self {
@@ -110,6 +152,7 @@ impl InstanceConfig {
             name: host.to_string(),
             host: host.to_string(),
             port: default_port(),
+            color: default_color(),
             enabled: true,
         }
     }
@@ -124,7 +167,11 @@ pub struct GlobalSettings {
     #[serde(default)]
     pub instances: Vec<InstanceConfig>,
     #[serde(default)]
+    pub groups: Vec<TargetGroup>,
+    #[serde(default)]
     pub seeded: bool,
+    #[serde(default)]
+    pub revision: u32,
 }
 
 /// One catalog row sent to an open inspector.
@@ -134,9 +181,9 @@ pub struct InstanceStatusMessage {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub color: String,
     pub enabled: bool,
-    pub status: String,
-    pub detail: String,
+    pub status: ConnectionState,
 }
 
 /// `sendToPropertyInspector` payload listing every configured switcher.
@@ -153,6 +200,9 @@ export_ts!(AtemStateMessage);
 export_ts!(OptionsMessage);
 export_ts!(InspectorCommand);
 export_ts!(InstanceConfig);
+export_ts!(TargetGroup);
+export_ts!(TargetSelector);
+export_ts!(ConnectionState);
 export_ts!(GlobalSettings);
 export_ts!(InstanceStatusMessage);
 export_ts!(StatusMessage);
@@ -193,41 +243,66 @@ impl StatusMessage {
     }
 }
 
-/// Fold locally added rows and live action hosts into `incoming`.
+/// Adopt `incoming` when it is at least as new as `memory`.
 ///
-/// The returned flag is true when the result differs from `incoming`, including
-/// the first time `seeded` flips on. Callers persist only then, so an echoed
-/// `didReceiveGlobalSettings` does not write the catalog again.
-pub fn merge_catalog(
-    mut incoming: GlobalSettings,
-    memory: &[InstanceConfig],
-    hosts: &[String],
-) -> (GlobalSettings, bool) {
-    let before = incoming.clone();
-    for instance in memory {
-        if !incoming.instances.iter().any(|item| item.id == instance.id) {
-            incoming.instances.push(instance.clone());
-        }
+/// A lower `revision` is an echo of an older write and is ignored, so deleting a
+/// switcher in the configuration window is not undone by a late settings event.
+/// The first read sets `seeded` and bumps `revision`.
+pub fn merge_catalog(incoming: GlobalSettings, memory: &GlobalSettings) -> (GlobalSettings, bool) {
+    if incoming.revision < memory.revision {
+        return (memory.clone(), false);
     }
-    for host in hosts {
-        let host = host.trim();
-        if host.is_empty() {
-            continue;
-        }
-        if incoming
-            .instances
+    let mut next = incoming;
+    if !next.seeded {
+        next.seeded = true;
+        next.revision = next.revision.saturating_add(1);
+    }
+    (next.clone(), next != *memory)
+}
+
+/// Enabled instance ids selected by the action.
+///
+/// An explicit `target` wins. A saved `atem_ip` with no target still addresses that
+/// one host. A key with neither addresses every enabled switcher.
+pub fn resolve_targets(
+    configs: &[InstanceConfig],
+    groups: &[TargetGroup],
+    settings: &ActionSettings,
+) -> Vec<String> {
+    let enabled: Vec<&InstanceConfig> = configs.iter().filter(|config| config.enabled).collect();
+    if let Some(target) = &settings.target {
+        return match target {
+            TargetSelector::All => enabled.iter().map(|config| config.id.clone()).collect(),
+            TargetSelector::Group { id } => {
+                let Some(group) = groups.iter().find(|group| group.id == *id) else {
+                    return Vec::new();
+                };
+                group
+                    .members
+                    .iter()
+                    .filter(|member| enabled.iter().any(|config| config.id == **member))
+                    .cloned()
+                    .collect()
+            }
+            TargetSelector::Instances { ids } => ids
+                .iter()
+                .filter(|id| enabled.iter().any(|config| config.id == **id))
+                .cloned()
+                .collect(),
+        };
+    }
+    if let Some(host) = normalized_ip(settings) {
+        return enabled
             .iter()
-            .any(|item| item.host.trim() == host)
-        {
-            continue;
-        }
-        incoming.instances.push(InstanceConfig::for_host(host));
+            .filter(|config| config.host.trim() == host)
+            .map(|config| config.id.clone())
+            .collect();
     }
-    if !incoming.seeded {
-        incoming.seeded = true;
-    }
-    let changed = incoming != before;
-    (incoming, changed)
+    enabled.iter().map(|config| config.id.clone()).collect()
+}
+
+fn read_target(value: Option<&Value>) -> Option<TargetSelector> {
+    value.and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 /// Trimmed ATEM address, if the action has one.
@@ -306,6 +381,7 @@ mod tests {
             settings,
             ActionSettings {
                 atem_ip: Some("192.168.1.10".into()),
+                target: None,
                 me: Some(1),
                 video_source: Some(3),
                 aux_bus: Some(0),
@@ -339,21 +415,77 @@ mod tests {
         assert!(!settings.seeded);
         assert!(settings.instances[0].enabled);
         assert_eq!(settings.instances[0].port, 9910);
+        assert_eq!(settings.instances[0].color, "#4c8dff");
+        assert!(settings.groups.is_empty());
     }
 
     #[test]
-    fn merge_catalog_keeps_local_rows_and_seeds_once() {
+    fn merge_catalog_seeds_once_and_keeps_a_newer_local_write() {
         let incoming = GlobalSettings::default();
-        let memory = vec![InstanceConfig::for_host("192.168.1.10")];
-        let (merged, changed) = merge_catalog(incoming, &memory, &["192.168.1.20".into()]);
+        let memory = GlobalSettings::default();
+        let (merged, changed) = merge_catalog(incoming, &memory);
         assert!(changed);
         assert!(merged.seeded);
-        assert_eq!(merged.instances.len(), 2);
-        assert_eq!(merged.instances[0].host, "192.168.1.10");
-        assert_eq!(merged.instances[1].id, "192.168.1.20");
+        assert_eq!(merged.revision, 1);
 
-        let (again, changed) = merge_catalog(merged.clone(), &merged.instances, &[]);
+        let mut local = merged.clone();
+        local
+            .instances
+            .push(InstanceConfig::for_host("192.168.1.10"));
+        local.revision = 2;
+        let stale = GlobalSettings {
+            seeded: true,
+            revision: 1,
+            ..GlobalSettings::default()
+        };
+        let (kept, changed) = merge_catalog(stale, &local);
         assert!(!changed);
-        assert_eq!(again, merged);
+        assert_eq!(kept.instances.len(), 1);
+
+        let mut deleted = local.clone();
+        deleted.instances.clear();
+        let (applied, changed) = merge_catalog(deleted, &local);
+        assert!(changed);
+        assert!(applied.instances.is_empty());
+    }
+
+    #[test]
+    fn resolve_targets_prefers_the_selector_over_a_legacy_address() {
+        let configs = vec![
+            InstanceConfig::for_host("192.168.1.10"),
+            InstanceConfig {
+                enabled: false,
+                ..InstanceConfig::for_host("192.168.1.11")
+            },
+            InstanceConfig::for_host("192.168.1.12"),
+        ];
+        let groups = vec![TargetGroup {
+            id: "studio".into(),
+            name: "Studio".into(),
+            members: vec!["192.168.1.10".into(), "192.168.1.11".into()],
+        }];
+        let legacy = ActionSettings {
+            atem_ip: Some("192.168.1.12".into()),
+            ..ActionSettings::default()
+        };
+        assert_eq!(
+            resolve_targets(&configs, &groups, &legacy),
+            vec!["192.168.1.12".to_string()]
+        );
+        let grouped = ActionSettings {
+            atem_ip: Some("192.168.1.12".into()),
+            target: Some(TargetSelector::Group {
+                id: "studio".into(),
+            }),
+            ..ActionSettings::default()
+        };
+        assert_eq!(
+            resolve_targets(&configs, &groups, &grouped),
+            vec!["192.168.1.10".to_string()]
+        );
+        assert_eq!(
+            resolve_targets(&configs, &groups, &ActionSettings::default()),
+            vec!["192.168.1.10".to_string(), "192.168.1.12".to_string()]
+        );
     }
 }

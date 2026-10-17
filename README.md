@@ -2,7 +2,7 @@
 
 Cross-platform Stream Deck plugin for **Blackmagic ATEM** control. Built with Rust.
 
-- **ATEM connection catalog** – switchers are stored in Stream Deck global settings. Each one keeps a supervised session with reconnect backoff, including after its keys leave the profile.
+- **ATEM connection window** – switchers and groups are edited in a separate window, as in the HyperDeck, vMix, and OBS plugins. Each switcher keeps a supervised session with reconnect backoff.
 - **Multiple dedicated actions** – Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, and downstream keyer controls.
 - **Typed Property Inspector** – one React inspector, generated from the Rust settings contract, sets the ATEM IP and the fields each action needs.
 - **Live state in PI** – ATEM connection status and input lists are pushed to the open inspector.
@@ -24,9 +24,9 @@ cd pi && npm install && npm run build
 
 1. Add one of the **ATEM actions** (Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, DSK) to your Stream Deck profile.
 2. Open the **Property Inspector** for that key.
-3. Set **ATEM IP** (e.g. `192.168.1.100`) and the action's bus (ME, AUX, or DSK).
+3. Choose **Send to**: all enabled switchers, a group, or selected switchers. Open **Manage instances** to add switchers (name, host, port) and groups in a separate window.
 4. For **Program/Preview**, AUX, and DSK source actions, also set the **Video source**. Use one key per input you care about.
-5. The IP is registered in the global switcher catalog. The status line shows Connecting, Disabled, the session error, or Connected, and the inspector lists every configured switcher. The session stays up when the key leaves the profile.
+5. Each switcher shows Connecting, Disabled, Connected, or the session error in the configuration window. The session stays up when the key leaves the profile. A key saved with only an ATEM IP still talks to that address.
 6. Press the key to run the configured action on that ATEM.
 7. For Program/Preview actions, key colours follow the ATEM:
    - Program Input keys: active input = red, inactive = gray.

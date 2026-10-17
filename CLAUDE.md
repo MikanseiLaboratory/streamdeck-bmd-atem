@@ -7,7 +7,7 @@ Key characteristics:
 - Uses [`necromancer`](https://github.com/Incomplete-Outputs-Lab/necromancer) (`feat/streamdeck`) for ATEM protocol and state management. `necromancer_protocol` is vendored in `third_party/necromancer_protocol` (upstream `fe286387`) so protocol 2.32 passes the firmware check. Upstream still rejects minor versions above 31.
 - Uses [`StreamDeckPluginRust`](https://github.com/MikanseiLaboratory/StreamDeckPluginRust) (`streamdeck-plugin`) for the Stream Deck WebSocket host, action registry, and TypeScript contract export.
 - The Property Inspector is a React app in `pi/`, built with [`@mikanseilaboratory/streamdeck-pi-client`](https://github.com/MikanseiLaboratory/streamdeck-pi-client). `cargo run --bin typegen` writes `pi/src/generated/contracts.ts`. Vite emits `dev.miseinul.atem.sdPlugin/ui/`.
-- Keeps one supervised ATEM session per catalog entry (`src/pool.rs`), using the same connection system as the HyperDeck and vMix plugins: instances live in Stream Deck global settings, and each entry is Disabled, Connecting, Connected, or Disconnected with a message.
+- Keeps one supervised ATEM session per catalog entry (`src/pool.rs`). Instances and groups are edited in a separate configuration window, the same way as the HyperDeck, vMix, and OBS plugins. Each entry is Disabled, Connecting, Connected, or Disconnected with a message.
 - Pushes ATEM state (at least connectivity and bus selection) into the Property Inspector and uses it to drive key images.
 
 ## Actions and settings
@@ -44,9 +44,11 @@ The same struct is exported to TypeScript. The inspector shows only the fields t
 - `GlobalSettings` (`instances`, `seeded`), applied from `didReceiveGlobalSettings`
 - the plugin `CommandSender`, captured in `PluginService::start`
 
-`PluginService::start` asks Stream Deck for global settings. `GlobalHook` parses them and calls `AtemPool::reconcile`. The catalog is the source of truth: a supervisor stays up after its keys disappear, a disabled instance does not open a socket, and changing host, port, or `enabled` restarts that slot. A generation counter stops a replaced supervisor from writing status onto the new slot. The first settings read sets `seeded` and does not insert a localhost switcher.
+`PluginService::start` asks Stream Deck for global settings. `GlobalHook` parses them and calls `AtemPool::reconcile`. The catalog is the source of truth: a supervisor stays up after its keys disappear, a disabled instance does not open a socket, and changing host, port, or `enabled` restarts that slot. A generation counter stops a replaced supervisor from writing status onto the new slot. `revision` stops an older settings echo from putting a deleted switcher back. The first settings read sets `seeded` and does not insert a localhost switcher.
 
-An action still selects one switcher with `atem_ip`. The first time that address is used, the plugin adds an enabled instance (`id` and `name` are the address, port `9910`) and writes it back with `setGlobalSettings`. Commands run only while that instance is `Connected`. The supervisor calls `AtemController::connect_udp` with necromancer's own reconnect disabled, including after an invalid address, and waits `1s`, `2s`, `4s`, … up to `30s` between attempts. A background task applies pool state events to key images and open inspectors.
+The property inspector opens `configuration.html` in a separate window. That window edits `GlobalSettings.instances` (name, host, port, color, enabled) and `groups`, and can reconnect one switcher or all of them. Each action stores a `target`: all enabled switchers, one group, or a list of instance ids. Commands run on every selected switcher that is `Connected`. A profile that only has `atem_ip` still addresses that one host, and the plugin adds it to the catalog the first time the key appears.
+
+The supervisor calls `AtemController::connect_udp` with necromancer's own reconnect disabled, including after an invalid address, and waits `1s`, `2s`, `4s`, … up to `30s` between attempts. A background task applies pool state events to key images and open inspectors.
 
 State updates still drive key images:
 
@@ -56,8 +58,8 @@ State updates still drive key images:
 
 Inspector messages use `type`:
 
-- plugin → inspector: `atemState` (`connected`, `detail`), `status` (`instances`), and `options` (`kind`, `items`, `connected`, `detail`)
-- inspector → plugin: `requestOptions` (`kind` is `me`, `video`, `aux`, `auxVideo`, or `dsk`)
+- plugin → inspector: `atemState` (`connected`, `detail`), `status` (`instances` with a tagged `status.kind`), and `options` (`kind`, `items`, `connected`, `detail`)
+- inspector → plugin: `ready`, `reconnect` (`id` optional), and `requestOptions` (`kind` is `me`, `video`, `aux`, `auxVideo`, or `dsk`)
 
 ### Mapping actions to ATEM commands
 
@@ -86,7 +88,7 @@ A successful Auto or DSK Auto press paints that key red immediately. The next ma
 
 `manifest.json` sets `PropertyInspectorPath` to `ui/index.html`. That bundle is the Vite build of `pi/`. One page serves every action and chooses fields from `actionInfo.action`.
 
-Settings round-trip through `useSettings`. Dynamic lists are not sdpi-components datasources anymore: the page sends `requestOptions`, and the plugin answers with the current ATEM topology (or a fallback list when the switcher is not connected yet). Connection status uses `atemState`.
+Settings round-trip through `useSettings`. The target picker and **Manage instances** button follow the HyperDeck, vMix, and OBS inspectors: the button opens `ui/configuration.html`, which talks to the inspector through `window.atemConfig`. Dynamic lists are not sdpi-components datasources anymore: the page sends `requestOptions`, and the plugin answers with the current ATEM topology (or a fallback list when the switcher is not connected yet).
 
 ## Notes for future work
 

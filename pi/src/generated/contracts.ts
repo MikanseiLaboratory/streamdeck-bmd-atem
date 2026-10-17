@@ -2,13 +2,19 @@
 
 export type StatusMessage = { type: string, instances: Array<InstanceStatusMessage>, };
 
-export type InstanceStatusMessage = { id: string, name: string, host: string, port: number, enabled: boolean, status: string, detail: string, };
+export type InstanceStatusMessage = { id: string, name: string, host: string, port: number, color: string, enabled: boolean, status: ConnectionState, };
 
-export type GlobalSettings = { instances: Array<InstanceConfig>, seeded: boolean, };
+export type GlobalSettings = { instances: Array<InstanceConfig>, groups: Array<TargetGroup>, seeded: boolean, revision: number, };
 
-export type InstanceConfig = { id: string, name: string, host: string, port: number, enabled: boolean, };
+export type ConnectionState = { "kind": "disabled" } | { "kind": "connecting" } | { "kind": "connected" } | { "kind": "disconnected", message: string, };
 
-export type InspectorCommand = { type: string, kind: string, atem_ip: string | null, };
+export type TargetSelector = { "kind": "all" } | { "kind": "group", id: string, } | { "kind": "instances", ids: Array<string>, };
+
+export type TargetGroup = { id: string, name: string, members: Array<string>, };
+
+export type InstanceConfig = { id: string, name: string, host: string, port: number, color: string, enabled: boolean, };
+
+export type InspectorCommand = { type: string, kind: string, atem_ip: string | null, target: TargetSelector | null, id: string | null, };
 
 export type OptionsMessage = { type: string, kind: string, items: Array<SelectItem>, connected: boolean, detail: string, };
 
@@ -16,5 +22,5 @@ export type AtemStateMessage = { type: string, connected: boolean, detail: strin
 
 export type SelectItem = { label: string, value: string, };
 
-export type ActionSettings = { atem_ip: string | null, me: number | null, video_source: number | null, aux_bus: number | null, key: number | null, on_air: boolean | null, };
+export type ActionSettings = { atem_ip: string | null, target: TargetSelector | null, me: number | null, video_source: number | null, aux_bus: number | null, key: number | null, on_air: boolean | null, };
 

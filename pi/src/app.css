@@ -1,3 +1,17 @@
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin: 0 6px 0 2px;
+  vertical-align: middle;
+}
+
+.sdpi-item-child {
+  display: flex;
+  align-items: center;
+}
+
 .status-connected {
   color: #7dcea0;
 }

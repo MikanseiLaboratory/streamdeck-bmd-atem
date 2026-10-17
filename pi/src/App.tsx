@@ -1,9 +1,23 @@
-import { usePluginMessage, useSendToPlugin, useSettings, useStreamDeck } from "@mikanseilaboratory/streamdeck-pi-client";
+import { useGlobalSettings, usePluginMessage, useSendToPlugin, useSettings, useStreamDeck } from "@mikanseilaboratory/streamdeck-pi-client";
 import { useEffect, useRef, useState } from "react";
-import type { ActionSettings, AtemStateMessage, InstanceStatusMessage, OptionsMessage, SelectItem, StatusMessage } from "./generated/contracts";
+import type { AtemConfigBridge, LiveInstance } from "./bridge";
+import type {
+  ActionSettings,
+  AtemStateMessage,
+  GlobalSettings,
+  InstanceConfig,
+  OptionsMessage,
+  SelectItem,
+  StatusMessage,
+  TargetGroup,
+  TargetSelector,
+} from "./generated/contracts";
+
+const CONFIG_WINDOW = "atem-config";
 
 const EMPTY_SETTINGS: ActionSettings = {
   atem_ip: null,
+  target: null,
   me: null,
   video_source: null,
   aux_bus: null,
@@ -11,55 +25,89 @@ const EMPTY_SETTINGS: ActionSettings = {
   on_air: null,
 };
 
-type InspectorMessage = AtemStateMessage | OptionsMessage | StatusMessage;
+const GLOBAL_DEFAULTS: GlobalSettings = {
+  instances: [],
+  groups: [],
+  seeded: false,
+  revision: 0,
+};
 
+type Settings = ActionSettings & Record<string, unknown>;
+type Globals = GlobalSettings & Record<string, unknown>;
+type InspectorMessage = AtemStateMessage | OptionsMessage | StatusMessage;
 type NumberField = "me" | "video_source" | "aux_bus" | "key";
 
 export function App() {
   const deck = useStreamDeck();
   const action = deck.actionInfo?.action ?? "";
-  const { settings, setSettings } = useSettings<ActionSettings>(EMPTY_SETTINGS);
+  const { settings, setSettings } = useSettings<Settings>(EMPTY_SETTINGS);
+  const global = useGlobalSettings<Globals>(GLOBAL_DEFAULTS);
   const sendToPlugin = useSendToPlugin();
-  const [connected, setConnected] = useState(false);
-  const [detail, setDetail] = useState("");
-  const [instances, setInstances] = useState<InstanceStatusMessage[]>([]);
+  const [statuses, setStatuses] = useState<LiveInstance[]>([]);
   const [options, setOptions] = useState<Record<string, SelectItem[]>>({});
-  const ipRef = useRef(settings.atem_ip);
-  ipRef.current = settings.atem_ip;
+  const settingsRef = useRef(global.settings);
+  const statusRef = useRef(statuses);
+  const listenersRef = useRef(new Set<(instances: LiveInstance[]) => void>());
+  const configWindowRef = useRef<Window | null>(null);
+  const sendRef = useRef(sendToPlugin);
+  settingsRef.current = global.settings;
+  statusRef.current = statuses;
+  sendRef.current = sendToPlugin;
+
+  const instances = global.settings.instances ?? [];
+  const groups = global.settings.groups ?? [];
+  const target = shownTarget(settings, instances);
+  const targetKey = JSON.stringify(target);
 
   usePluginMessage<InspectorMessage>((message) => {
-    if (message.type === "atemState" && "connected" in message) {
-      setConnected(message.connected);
-      setDetail(message.detail);
-    }
     if (message.type === "options" && "items" in message) {
-      setConnected(message.connected);
-      setDetail(message.detail);
       setOptions((previous) => ({ ...previous, [message.kind]: message.items }));
     }
     if (message.type === "status" && "instances" in message) {
-      setInstances(message.instances);
-      const selected = (ipRef.current ?? "").trim();
-      const mine = message.instances.find((item) => item.host === selected);
-      if (mine) {
-        setConnected(mine.status === "Connected");
-        setDetail(mine.detail || mine.status);
-      }
+      setStatuses(message.instances);
     }
   });
 
   useEffect(() => {
+    const bridge: AtemConfigBridge = {
+      getSettings: () => settingsRef.current,
+      setSettings: (next) => global.setSettings(next as Globals),
+      reconnect: (id) => sendRef.current({ type: "reconnect", id }),
+      subscribe: (listener) => {
+        listenersRef.current.add(listener);
+        listener(statusRef.current);
+        return () => listenersRef.current.delete(listener);
+      },
+    };
+    window.atemConfig = bridge;
+    return () => {
+      if (window.atemConfig === bridge) delete window.atemConfig;
+    };
+  }, [global.setSettings]);
+
+  useEffect(() => {
+    for (const listener of listenersRef.current) listener(statuses);
+    const child = configWindowRef.current;
+    if (child && !child.closed && child.opener === window) {
+      child.refreshAtemConfig?.(settingsRef.current, statuses);
+    }
+  }, [statuses, global.settings]);
+
+  useEffect(() => {
+    sendToPlugin({ type: "ready" });
+    const retry = window.setTimeout(() => sendToPlugin({ type: "ready" }), 250);
+    return () => window.clearTimeout(retry);
+  }, [sendToPlugin]);
+
+  useEffect(() => {
+    const selected = JSON.parse(targetKey) as TargetSelector;
     const timer = window.setTimeout(() => {
       for (const kind of kindsFor(action)) {
-        sendToPlugin({ type: "requestOptions", kind, atem_ip: settings.atem_ip });
+        sendToPlugin({ type: "requestOptions", kind, atem_ip: settings.atem_ip, target: selected });
       }
     }, 200);
     return () => window.clearTimeout(timer);
-  }, [action, sendToPlugin, settings.atem_ip]);
-
-  const setText = (atemIp: string) => {
-    setSettings((previous) => ({ ...previous, atem_ip: atemIp }));
-  };
+  }, [action, sendToPlugin, settings.atem_ip, targetKey]);
 
   const setNumber = (field: NumberField, raw: string) => {
     setSettings((previous) => ({
@@ -77,20 +125,44 @@ export function App() {
 
   const fields = fieldsFor(action);
 
+  const openConfig = () => {
+    const features = "width=760,height=840";
+    const existing = window.open("", CONFIG_WINDOW);
+    if (!existing) return;
+    let owned = false;
+    try {
+      owned = existing.opener === window;
+    } catch {
+      owned = false;
+    }
+    if (!owned) {
+      existing.close();
+      configWindowRef.current = window.open("./configuration.html", CONFIG_WINDOW, features);
+      return;
+    }
+    const href = existing.location.href;
+    if (href.includes("configuration.html")) {
+      existing.focus();
+      existing.refreshAtemConfig?.(settingsRef.current, statusRef.current);
+      configWindowRef.current = existing;
+      return;
+    }
+    existing.location.href = new URL("./configuration.html", window.location.href).href;
+    configWindowRef.current = existing;
+  };
+
   return (
     <div className="sdpi-wrapper">
-      <div className="sdpi-heading">ATEM</div>
-      <div className="sdpi-item">
-        <div className="sdpi-item-label">ATEM IP address</div>
-        <input
-          className="sdpi-item-value"
-          type="text"
-          placeholder="192.168.1.100"
-          value={settings.atem_ip ?? ""}
-          onChange={(event) => setText(event.target.value)}
-        />
-      </div>
+      <div className="sdpi-heading">Target</div>
+      <TargetPicker
+        instances={instances}
+        groups={groups}
+        statuses={statuses}
+        value={target}
+        onChange={(next) => setSettings((previous) => ({ ...previous, target: next }))}
+      />
 
+      <div className="sdpi-heading">ATEM</div>
       {fields.me && (
         <SelectField
           label="ME (Mix Effect) index"
@@ -134,28 +206,104 @@ export function App() {
         </div>
       )}
 
+      <div className="sdpi-heading">Connections</div>
       <div className="sdpi-item">
-        <div className="sdpi-item-label">Connection</div>
-        <div className={`sdpi-item-value ${connected ? "status-connected" : "status-disconnected"}`}>
-          {connected ? "Connected to ATEM" : detail || "Not connected"}
-        </div>
+        <div className="sdpi-item-label">ATEM</div>
+        <button className="sdpi-item-value" type="button" onClick={openConfig}>
+          Manage instances
+        </button>
       </div>
-      {instances.length > 0 && (
-        <div className="sdpi-item">
-          <div className="sdpi-item-label">Switchers</div>
-          <div className="sdpi-item-value">
-            {instances.map((item) => (
-              <div key={item.id}>
-                {item.name} ({item.host}
-                {item.port === 9910 ? "" : `:${item.port}`}) — {item.status}
-                {item.detail && item.detail !== item.status ? `: ${item.detail}` : ""}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
+}
+
+function TargetPicker({
+  instances,
+  groups,
+  statuses,
+  value,
+  onChange,
+}: {
+  instances: InstanceConfig[];
+  groups: TargetGroup[];
+  statuses: LiveInstance[];
+  value: TargetSelector;
+  onChange: (value: TargetSelector) => void;
+}) {
+  const mode = value.kind === "group" ? "group" : value.kind === "instances" ? "instances" : "all";
+  return (
+    <>
+      <div className="sdpi-item">
+        <div className="sdpi-item-label">Send to</div>
+        <select
+          className="sdpi-item-value select"
+          value={mode}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (next === "all") onChange({ kind: "all" });
+            if (next === "group") onChange({ kind: "group", id: groups[0]?.id ?? "" });
+            if (next === "instances") onChange({ kind: "instances", ids: instances[0] ? [instances[0].id] : [] });
+          }}
+        >
+          <option value="all">All enabled</option>
+          <option value="group">Group</option>
+          <option value="instances">Selected switchers</option>
+        </select>
+      </div>
+      {value.kind === "group" && (
+        <div className="sdpi-item">
+          <div className="sdpi-item-label">Group</div>
+          <select
+            className="sdpi-item-value select"
+            value={value.id}
+            onChange={(event) => onChange({ kind: "group", id: event.target.value })}
+          >
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name || group.id}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {value.kind === "instances" &&
+        instances.map((instance) => {
+          const status = statuses.find((item) => item.id === instance.id)?.status?.kind;
+          return (
+            <div className="sdpi-item" key={instance.id}>
+              <div className="sdpi-item-label">{status ?? ""}</div>
+              <div className="sdpi-item-value">
+                <span className="sdpi-item-child">
+                  <input
+                    type="checkbox"
+                    checked={value.ids.includes(instance.id)}
+                    onChange={(event) => {
+                      const ids = event.target.checked
+                        ? [...value.ids, instance.id]
+                        : value.ids.filter((id) => id !== instance.id);
+                      onChange({ kind: "instances", ids });
+                    }}
+                  />
+                  <label>
+                    <span className="swatch" style={{ background: instance.color }} />
+                    {instance.name || instance.host}
+                  </label>
+                </span>
+              </div>
+            </div>
+          );
+        })}
+    </>
+  );
+}
+
+function shownTarget(settings: ActionSettings, instances: InstanceConfig[]): TargetSelector {
+  if (settings.target) return settings.target;
+  const host = (settings.atem_ip ?? "").trim();
+  if (!host) return { kind: "all" };
+  const ids = instances.filter((item) => item.host.trim() === host).map((item) => item.id);
+  if (ids.length > 0) return { kind: "instances", ids };
+  return { kind: "all" };
 }
 
 function SelectField({

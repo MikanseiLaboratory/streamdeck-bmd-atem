@@ -18,9 +18,9 @@ use streamdeck_plugin::{
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::contracts::{
-    cycle_index, merge_catalog, normalized_ip, ActionSettings, AtemStateMessage, GlobalSettings,
-    InspectorCommand, InstanceConfig, InstanceStatusMessage, OptionsMessage, SelectItem,
-    StatusMessage,
+    cycle_index, merge_catalog, normalized_ip, resolve_targets, ActionSettings, AtemStateMessage,
+    ConnectionState, GlobalSettings, InspectorCommand, InstanceConfig, InstanceStatusMessage,
+    OptionsMessage, SelectItem, StatusMessage,
 };
 use crate::pool::{AtemInstanceConfig, AtemPool, ConnectionStatus, PoolEvent, PoolOptions};
 
@@ -96,10 +96,8 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        if let Some(ip) = normalized_ip(settings) {
-            self.runtime.ensure_instance(&ip).await;
-            self.runtime.refresh_ip(&ip).await;
-        }
+        self.runtime.ensure_legacy_instance(settings).await;
+        self.runtime.refresh_settings(settings).await;
     }
 
     pub async fn on_will_disappear(&self, context: &str) {
@@ -116,10 +114,8 @@ impl AppState {
         self.runtime
             .upsert_key(action, context, settings.clone())
             .await;
-        if let Some(ip) = normalized_ip(settings) {
-            self.runtime.ensure_instance(&ip).await;
-            self.runtime.refresh_ip(&ip).await;
-        }
+        self.runtime.ensure_legacy_instance(settings).await;
+        self.runtime.refresh_settings(settings).await;
         if self.runtime.inspectors.read().await.contains_key(context) {
             self.runtime
                 .inspectors
@@ -141,9 +137,7 @@ impl AppState {
             .write()
             .await
             .insert(context.to_string(), normalized_ip(settings));
-        if let Some(ip) = normalized_ip(settings) {
-            self.runtime.ensure_instance(&ip).await;
-        }
+        self.runtime.ensure_legacy_instance(settings).await;
         self.push_inspector(action, context, settings).await;
         self.runtime.push_catalog_status().await;
     }
@@ -160,8 +154,23 @@ impl AppState {
     pub async fn on_property_inspector_message(&self, context: &str, payload: &Value) {
         let command =
             serde_json::from_value::<InspectorCommand>(payload.clone()).unwrap_or_default();
-        if command.r#type != "requestOptions" {
-            return;
+        match command.r#type.as_str() {
+            "ready" | "refresh" => {
+                self.runtime
+                    .inspectors
+                    .write()
+                    .await
+                    .entry(context.to_string())
+                    .or_insert(None);
+                self.runtime.push_catalog_status().await;
+                return;
+            }
+            "reconnect" => {
+                self.runtime.reconnect(command.id.as_deref()).await;
+                return;
+            }
+            "requestOptions" => {}
+            _ => return,
         }
         let mut settings = self
             .runtime
@@ -179,6 +188,9 @@ impl AppState {
         {
             settings.atem_ip = Some(ip);
         }
+        if command.target.is_some() {
+            settings.target = command.target.clone();
+        }
         if self.runtime.inspectors.read().await.contains_key(context) {
             self.runtime
                 .inspectors
@@ -186,13 +198,8 @@ impl AppState {
                 .await
                 .insert(context.to_string(), normalized_ip(&settings));
         }
-        if let Some(ip) = normalized_ip(&settings) {
-            self.runtime.ensure_instance(&ip).await;
-        }
-        let (connected, detail) = self
-            .runtime
-            .connection_view(normalized_ip(&settings).as_deref())
-            .await;
+        self.runtime.ensure_legacy_instance(&settings).await;
+        let (connected, detail) = self.runtime.connection_view(&settings).await;
         let items = self.runtime.options(&command.kind, &settings).await;
         self.runtime
             .send_pi(
@@ -208,67 +215,91 @@ impl AppState {
         settings: &ActionSettings,
         kind: TransitionKind,
     ) {
-        let Some(controller) = self.controller_for(context, settings, false).await else {
-            return;
-        };
-        let me = settings.me.unwrap_or(0);
-        let result = match kind {
-            TransitionKind::Cut => controller.cut(me).await,
-            TransitionKind::Auto => controller.auto(me).await,
-            TransitionKind::CutBlack => controller.cut_black(me, true).await,
-            TransitionKind::FadeToBlack => controller.toggle_auto_black(me).await,
-        };
-        if let Err(error) = result {
-            self.runtime
-                .log(&format!("ATEM transition failed (me={me}): {error}"))
-                .await;
+        let targets = self.targets_for(context, settings, false).await;
+        if targets.is_empty() {
             return;
         }
-        if kind == TransitionKind::Auto {
+        let me = settings.me.unwrap_or(0);
+        let mut failed = false;
+        for target in &targets {
+            let result = match kind {
+                TransitionKind::Cut => target.controller.cut(me).await,
+                TransitionKind::Auto => target.controller.auto(me).await,
+                TransitionKind::CutBlack => target.controller.cut_black(me, true).await,
+                TransitionKind::FadeToBlack => target.controller.toggle_auto_black(me).await,
+            };
+            if let Err(error) = result {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM transition failed on {} (me={me}): {error}",
+                        target.label
+                    ))
+                    .await;
+            }
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
+        } else if kind == TransitionKind::Auto {
             self.runtime.set_image(context, IMAGE_RED).await;
         }
     }
 
     pub async fn press_bus(&self, context: &str, settings: &ActionSettings, program: bool) {
-        let Some(controller) = self.controller_for(context, settings, false).await else {
-            return;
-        };
-        let me = settings.me.unwrap_or(0);
-        let source = video_source_from_id(settings.video_source.unwrap_or(0));
-        let result = if program {
-            controller.set_program_input(me, source).await
-        } else {
-            controller.set_preview_input(me, source).await
-        };
-        if let Err(error) = result {
-            self.runtime
-                .log(&format!("ATEM bus change failed (me={me}): {error}"))
-                .await;
+        let targets = self.targets_for(context, settings, false).await;
+        if targets.is_empty() {
             return;
         }
-        let state = controller.get_state().await;
-        if let Some(ip) = normalized_ip(settings) {
+        let me = settings.me.unwrap_or(0);
+        let source = video_source_from_id(settings.video_source.unwrap_or(0));
+        let mut failed = false;
+        for target in &targets {
+            let result = if program {
+                target.controller.set_program_input(me, source).await
+            } else {
+                target.controller.set_preview_input(me, source).await
+            };
+            if let Err(error) = result {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM bus change failed on {} (me={me}): {error}",
+                        target.label
+                    ))
+                    .await;
+                continue;
+            }
+            let state = target.controller.get_state().await;
             self.runtime
-                .refresh_program_preview(&ip, &state, true)
+                .refresh_program_preview(&target.host, &state, true)
                 .await;
             self.runtime
-                .refresh_program_preview(&ip, &state, false)
+                .refresh_program_preview(&target.host, &state, false)
                 .await;
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
         }
     }
 
     pub async fn press_aux(&self, context: &str, settings: &ActionSettings) {
-        let Some(controller) = self.controller_for(context, settings, true).await else {
-            return;
-        };
+        let targets = self.targets_for(context, settings, true).await;
         let aux_bus = settings.aux_bus.unwrap_or(0);
         let source = video_source_from_id(settings.video_source.unwrap_or(0));
-        if let Err(error) = controller.set_aux_source(aux_bus, source).await {
-            self.runtime
-                .log(&format!(
-                    "ATEM AUX change failed (aux_bus={aux_bus}, source={source:?}): {error}"
-                ))
-                .await;
+        let mut failed = false;
+        for target in &targets {
+            if let Err(error) = target.controller.set_aux_source(aux_bus, source).await {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM AUX change failed on {} (aux_bus={aux_bus}, source={source:?}): {error}",
+                        target.label
+                    ))
+                    .await;
+            }
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
         }
     }
 
@@ -279,8 +310,9 @@ impl AppState {
         settings: &ActionSettings,
         ticks: i64,
     ) -> Option<ActionSettings> {
-        let controller = self.controller_for(context, settings, true).await?;
-        let state = controller.get_state().await;
+        let targets = self.targets_for(context, settings, true).await;
+        let first = targets.first()?;
+        let state = first.controller.get_state().await;
         let source_ids = aux_source_ids(&state);
         if source_ids.is_empty() {
             return None;
@@ -290,13 +322,20 @@ impl AppState {
         let new_id = source_ids[cycle_index(source_ids.len(), index, ticks)];
         let aux_bus = settings.aux_bus.unwrap_or(0);
         let source = video_source_from_id(new_id);
-        if let Err(error) = controller.set_aux_source(aux_bus, source).await {
-            self.runtime
-                .log(&format!(
-                    "ATEM AUX dial failed (aux_bus={aux_bus}, source_id={new_id}): {error}"
-                ))
-                .await;
-            return None;
+        let mut failed = false;
+        for target in &targets {
+            if let Err(error) = target.controller.set_aux_source(aux_bus, source).await {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM AUX dial failed on {} (aux_bus={aux_bus}, source_id={new_id}): {error}",
+                        target.label
+                    ))
+                    .await;
+            }
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
         }
         let mut updated = settings.clone();
         updated.video_source = Some(new_id);
@@ -307,102 +346,132 @@ impl AppState {
     }
 
     pub async fn press_dsk(&self, context: &str, settings: &ActionSettings, kind: DskKind) {
-        let Some(controller) = self.controller_for(context, settings, true).await else {
-            return;
-        };
-        let key = settings.key.unwrap_or(0);
-        let result = match kind {
-            DskKind::Auto => controller.dsk_auto(key).await,
-            DskKind::OnAir => {
-                let on_air = match settings.on_air {
-                    Some(on_air) => on_air,
-                    None => {
-                        let state = controller.get_state().await;
-                        let current = state
-                            .dsk_state
-                            .get(&key)
-                            .map(|dsk| dsk.on_air)
-                            .unwrap_or(false);
-                        !current
-                    }
-                };
-                controller.set_dsk_on_air(key, on_air).await
-            }
-            DskKind::Cut => {
-                controller
-                    .set_dsk_cut_source(
-                        key,
-                        video_source_from_id(settings.video_source.unwrap_or(0)),
-                    )
-                    .await
-            }
-            DskKind::Fill => {
-                controller
-                    .set_dsk_fill_source(
-                        key,
-                        video_source_from_id(settings.video_source.unwrap_or(0)),
-                    )
-                    .await
-            }
-        };
-        if let Err(error) = result {
-            self.runtime
-                .log(&format!("ATEM DSK action failed (key={key}): {error}"))
-                .await;
+        let targets = self.targets_for(context, settings, true).await;
+        if targets.is_empty() {
             return;
         }
-        if kind == DskKind::Auto {
-            self.runtime.set_image(context, IMAGE_RED).await;
-        } else if kind == DskKind::OnAir {
-            let state = controller.get_state().await;
-            if let Some(ip) = normalized_ip(settings) {
-                self.runtime.refresh_dsk_on_air(&ip, &state).await;
+        let key = settings.key.unwrap_or(0);
+        let mut failed = false;
+        for target in &targets {
+            let result = match kind {
+                DskKind::Auto => target.controller.dsk_auto(key).await,
+                DskKind::OnAir => {
+                    let on_air = match settings.on_air {
+                        Some(on_air) => on_air,
+                        None => {
+                            let state = target.controller.get_state().await;
+                            let current = state
+                                .dsk_state
+                                .get(&key)
+                                .map(|dsk| dsk.on_air)
+                                .unwrap_or(false);
+                            !current
+                        }
+                    };
+                    target.controller.set_dsk_on_air(key, on_air).await
+                }
+                DskKind::Cut => {
+                    target
+                        .controller
+                        .set_dsk_cut_source(
+                            key,
+                            video_source_from_id(settings.video_source.unwrap_or(0)),
+                        )
+                        .await
+                }
+                DskKind::Fill => {
+                    target
+                        .controller
+                        .set_dsk_fill_source(
+                            key,
+                            video_source_from_id(settings.video_source.unwrap_or(0)),
+                        )
+                        .await
+                }
+            };
+            if let Err(error) = result {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM DSK action failed on {} (key={key}): {error}",
+                        target.label
+                    ))
+                    .await;
+                continue;
             }
+            if kind == DskKind::OnAir {
+                let state = target.controller.get_state().await;
+                self.runtime.refresh_dsk_on_air(&target.host, &state).await;
+            }
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
+        } else if kind == DskKind::Auto {
+            self.runtime.set_image(context, IMAGE_RED).await;
         }
     }
 
-    async fn controller_for(
+    async fn targets_for(
         &self,
         context: &str,
         settings: &ActionSettings,
         alert: bool,
-    ) -> Option<Arc<AtemController>> {
-        let Some(ip) = normalized_ip(settings) else {
+    ) -> Vec<ReadyTarget> {
+        self.runtime.ensure_legacy_instance(settings).await;
+        let global = self.runtime.global.read().await.clone();
+        let ids = resolve_targets(&global.instances, &global.groups, settings);
+        if ids.is_empty() {
             self.runtime
-                .log("ATEM action ignored: IP address is empty")
+                .log("ATEM action ignored: no switcher selected")
                 .await;
             if alert {
                 self.runtime.show_alert(context).await;
             }
-            return None;
-        };
-        self.runtime.ensure_instance(&ip).await;
-        if let Some(controller) = self.runtime.pool.controller_for_host(&ip).await {
-            return Some(controller);
+            return Vec::new();
         }
-        let (_, detail) = self.runtime.connection_view(Some(&ip)).await;
-        let detail = if detail.is_empty() {
-            "not connected".to_string()
-        } else {
-            detail
-        };
-        self.runtime
-            .log(&format!("ATEM {ip} is not ready: {detail}"))
-            .await;
-        if alert {
-            self.runtime.show_alert(context).await;
+        let mut ready = Vec::new();
+        let mut missed = Vec::new();
+        for id in ids {
+            let Some(instance) = global.instances.iter().find(|item| item.id == id) else {
+                continue;
+            };
+            if let Some(controller) = self.runtime.pool.controller(&id).await {
+                ready.push(ReadyTarget {
+                    host: instance.host.clone(),
+                    label: instance.name.clone(),
+                    controller,
+                });
+            } else {
+                missed.push(instance.name.clone());
+            }
         }
-        None
+        if ready.is_empty() {
+            self.runtime
+                .log(&format!(
+                    "ATEM action ignored: {} not connected",
+                    missed.join(", ")
+                ))
+                .await;
+            if alert {
+                self.runtime.show_alert(context).await;
+            }
+        } else if !missed.is_empty() {
+            self.runtime
+                .log(&format!(
+                    "ATEM action skipped disconnected switchers: {}",
+                    missed.join(", ")
+                ))
+                .await;
+        }
+        ready
     }
 
     async fn push_inspector(&self, action: &str, context: &str, settings: &ActionSettings) {
-        let (connected, detail) = self
-            .runtime
-            .connection_view(normalized_ip(settings).as_deref())
-            .await;
+        let (connected, detail) = self.runtime.connection_view(settings).await;
         self.runtime
             .send_pi(context, &AtemStateMessage::new(connected, &detail))
             .await;
+        self.runtime.push_catalog_status().await;
         for kind in option_kinds(action) {
             let items = self.runtime.options(kind, settings).await;
             self.runtime
@@ -413,6 +482,12 @@ impl AppState {
                 .await;
         }
     }
+}
+
+struct ReadyTarget {
+    host: String,
+    label: String,
+    controller: Arc<AtemController>,
 }
 
 /// Receives `didReceiveGlobalSettings`.
@@ -488,15 +563,24 @@ impl Runtime {
 
     async fn apply_global_value(&self, value: &Value) {
         let incoming = serde_json::from_value::<GlobalSettings>(value.clone()).unwrap_or_default();
-        let hosts = self.live_hosts().await;
         let mut global = self.global.write().await;
-        let (settings, changed) = merge_catalog(incoming, &global.instances, &hosts);
+        let (settings, changed) = merge_catalog(incoming, &global);
         *global = settings.clone();
         drop(global);
         if changed {
             self.persist_global(&settings).await;
         }
         self.apply_catalog(&settings).await;
+    }
+
+    async fn ensure_legacy_instance(&self, settings: &ActionSettings) {
+        if settings.target.is_some() {
+            return;
+        }
+        let Some(host) = normalized_ip(settings) else {
+            return;
+        };
+        self.ensure_instance(&host).await;
     }
 
     async fn ensure_instance(&self, host: &str) {
@@ -509,25 +593,29 @@ impl Runtime {
             return;
         }
         global.instances.push(InstanceConfig::for_host(host));
+        global.revision = global.revision.saturating_add(1);
         let settings = global.clone();
         drop(global);
         self.persist_global(&settings).await;
         self.apply_catalog(&settings).await;
     }
 
-    async fn live_hosts(&self) -> Vec<String> {
-        let mut hosts = Vec::new();
-        for record in self.keys.read().await.values() {
-            if let Some(host) = normalized_ip(&record.settings) {
-                hosts.push(host);
-            }
+    async fn reconnect(&self, id: Option<&str>) {
+        if let Some(id) = id {
+            self.pool.reconnect(id).await;
+            return;
         }
-        for watched in self.inspectors.read().await.values().flatten() {
-            if !watched.is_empty() {
-                hosts.push(watched.clone());
-            }
+        let ids: Vec<String> = self
+            .global
+            .read()
+            .await
+            .instances
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect();
+        for id in ids {
+            self.pool.reconnect(&id).await;
         }
-        hosts
     }
 
     async fn persist_global(&self, settings: &GlobalSettings) {
@@ -611,19 +699,28 @@ impl Runtime {
     }
 
     async fn push_catalog_status(&self) {
+        let global = self.global.read().await.clone();
         let instances = self
             .pool
             .statuses()
             .await
             .into_iter()
-            .map(|instance| InstanceStatusMessage {
-                id: instance.id,
-                name: instance.name,
-                host: instance.host,
-                port: instance.port,
-                enabled: instance.enabled,
-                status: instance.status.label().to_string(),
-                detail: instance.status.detail(),
+            .map(|instance| {
+                let color = global
+                    .instances
+                    .iter()
+                    .find(|item| item.id == instance.id)
+                    .map(|item| item.color.clone())
+                    .unwrap_or_else(|| "#4c8dff".to_string());
+                InstanceStatusMessage {
+                    id: instance.id,
+                    name: instance.name,
+                    host: instance.host,
+                    port: instance.port,
+                    color,
+                    enabled: instance.enabled,
+                    status: wire_state(&instance.status),
+                }
             })
             .collect();
         let message = StatusMessage::new(instances);
@@ -695,13 +792,37 @@ impl Runtime {
         }
     }
 
-    async fn connection_view(&self, ip: Option<&str>) -> (bool, String) {
-        let Some(ip) = ip else {
-            return (false, String::new());
-        };
-        match self.pool.status_for_host(ip).await {
-            Some(status) => (status.is_connected(), status.detail()),
-            None => (false, String::new()),
+    async fn connection_view(&self, settings: &ActionSettings) -> (bool, String) {
+        let global = self.global.read().await.clone();
+        let ids = resolve_targets(&global.instances, &global.groups, settings);
+        if ids.is_empty() {
+            return (false, "No switcher selected".to_string());
+        }
+        let mut connected = false;
+        let mut detail = String::new();
+        for id in ids {
+            match self.pool.status(&id).await {
+                Some(status) if status.is_connected() => connected = true,
+                Some(status) if detail.is_empty() => detail = status.detail(),
+                None if detail.is_empty() => detail = "Not connected".to_string(),
+                _ => {}
+            }
+        }
+        if connected {
+            (true, String::new())
+        } else {
+            (false, detail)
+        }
+    }
+
+    async fn refresh_settings(&self, settings: &ActionSettings) {
+        let global = self.global.read().await.clone();
+        let ids = resolve_targets(&global.instances, &global.groups, settings);
+        for id in ids {
+            let Some(instance) = global.instances.iter().find(|item| item.id == id) else {
+                continue;
+            };
+            self.refresh_ip(&instance.host).await;
         }
     }
 
@@ -782,23 +903,41 @@ impl Runtime {
         }
     }
 
-    async fn keys_for(&self, action: &str, ip: &str) -> Vec<(String, ActionSettings)> {
-        self.keys
+    async fn keys_for(&self, action: &str, host: &str) -> Vec<(String, ActionSettings)> {
+        let records: Vec<(String, ActionSettings)> = self
+            .keys
             .read()
             .await
             .iter()
-            .filter(|(_, record)| {
-                record.action == action && normalized_ip(&record.settings).as_deref() == Some(ip)
-            })
+            .filter(|(_, record)| record.action == action)
             .map(|(context, record)| (context.clone(), record.settings.clone()))
+            .collect();
+        let global = self.global.read().await.clone();
+        records
+            .into_iter()
+            .filter(|(_, settings)| {
+                resolve_targets(&global.instances, &global.groups, settings)
+                    .iter()
+                    .any(|id| {
+                        global
+                            .instances
+                            .iter()
+                            .any(|item| item.id == *id && item.host.trim() == host.trim())
+                    })
+            })
             .collect()
     }
 
     async fn options(&self, kind: &str, settings: &ActionSettings) -> Vec<SelectItem> {
-        let controller = match normalized_ip(settings) {
-            Some(ip) => self.pool.controller_for_host(&ip).await,
-            None => None,
-        };
+        let global = self.global.read().await.clone();
+        let ids = resolve_targets(&global.instances, &global.groups, settings);
+        let mut controller = None;
+        for id in ids {
+            if let Some(found) = self.pool.controller(&id).await {
+                controller = Some(found);
+                break;
+            }
+        }
         let state;
         let state_ref = if let Some(controller) = &controller {
             state = controller.get_state().await;
@@ -846,6 +985,17 @@ impl Runtime {
         if let Some(sender) = guard.as_ref() {
             let _ = sender.log_message(message);
         }
+    }
+}
+
+fn wire_state(status: &ConnectionStatus) -> ConnectionState {
+    match status {
+        ConnectionStatus::Disabled => ConnectionState::Disabled,
+        ConnectionStatus::Connecting => ConnectionState::Connecting,
+        ConnectionStatus::Connected => ConnectionState::Connected,
+        ConnectionStatus::Disconnected { message } => ConnectionState::Disconnected {
+            message: message.clone(),
+        },
     }
 }
 
