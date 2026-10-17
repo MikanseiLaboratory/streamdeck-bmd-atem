@@ -8,7 +8,7 @@
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
   "Name": "ATEM Control",
-  "Version": "0.1.0.0",
+  "Version": "0.2.0.0",
   "UUID": "dev.miseinul.atem",
   "OS": [
     {
@@ -35,7 +35,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/cut.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -52,7 +51,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/auto.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -69,7 +67,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/program_input.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -86,7 +83,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/preview_input.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -103,7 +99,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/cut_black.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -120,7 +115,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/fade_to_black.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -137,7 +131,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/aux_output.html",
       "Encoder": {
         "layout": "$B1",
         "TriggerDescription": {
@@ -161,7 +154,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/dsk_auto.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -178,7 +170,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/dsk_on_air.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -195,7 +186,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/dsk_cut.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -212,7 +202,6 @@
         "Keypad",
         "Encoder"
       ],
-      "PropertyInspectorPath": "PropertyInspector/dsk_fill.html",
       "States": [
         {
           "Image": "Images/icon",
@@ -221,5 +210,6 @@
       ],
       "Tooltip": "Set DSK fill source."
     }
-  ]
+  ],
+  "PropertyInspectorPath": "ui/index.html"
 }

@@ -1,7 +1,7 @@
 #! Local build & pack for Stream Deck plugin. 
 #! Requires: cargo, rustup target (x86_64-pc-windows-gnu), mingw-w64, `streamdeck` CLI (npm i -g @elgato/cli).
 
-.PHONY: build build-windows build-mac copy-binary pack
+.PHONY: build build-windows build-mac copy-binary pack pi typegen
 
 PLUGIN_DIR := dev.miseinul.atem.sdPlugin
 TARGET_MAC  := x86_64-apple-darwin
@@ -23,7 +23,13 @@ build: build-windows build-mac
 
 copy-binary: copy-binary-windows
 
-pack: copy-binary
+typegen:
+	cargo run --bin typegen
+
+pi: typegen
+	cd pi && npm install && npm run build
+
+pack: copy-binary pi
 	mkdir -p dist
 	streamdeck pack $(PLUGIN_DIR) --output dist --no-update-check -f
 

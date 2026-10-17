@@ -7,5 +7,7 @@ target/
 
 dev.miseinul.atem.sdPlugin/streamdeck-atem
 dev.miseinul.atem.sdPlugin/streamdeck-atem.exe
+dev.miseinul.atem.sdPlugin/ui/
 
 dist/dev.miseinul.atem.streamDeckPlugin
+pi/node_modules/
