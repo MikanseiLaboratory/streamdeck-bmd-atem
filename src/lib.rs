@@ -4,6 +4,7 @@
 //! `inventory` registrations for actions and settings stay in the build.
 
 pub mod actions;
+pub mod availability;
 pub mod contracts;
 pub mod pool;
 pub mod runtime;

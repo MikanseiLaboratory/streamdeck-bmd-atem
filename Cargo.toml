@@ -20,6 +20,10 @@ path = "src/bin/typegen.rs"
 
 [dependencies]
 anyhow = "1"
+# feat/streamdeck: protocol 2.32, AUX, and DSK. Typed InPr availability
+# (903633588352809b7eaf5c3cb79e8c8158ba90b1) is on main, which stops at
+# protocol 2.31 and has none of those commands. The bit layout from that
+# commit is decoded in src/availability.rs against this rev's availability3.
 necromancer = { git = "https://github.com/MikanseiLaboratory/necromancer", rev = "aee784e7db4dd32c890aa07491c10f92bf203611" }
 num-traits = "0.2"
 serde = { version = "1", features = ["derive"] }

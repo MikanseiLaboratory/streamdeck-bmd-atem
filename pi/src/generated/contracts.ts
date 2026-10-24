@@ -14,7 +14,7 @@ export type TargetGroup = { id: string, name: string, members: Array<string>, };
 
 export type InstanceConfig = { id: string, name: string, host: string, port: number, color: string, enabled: boolean, };
 
-export type InspectorCommand = { type: string, kind: string, atem_ip: string | null, target: TargetSelector | null, id: string | null, };
+export type InspectorCommand = { type: string, kind: string, atem_ip: string | null, target: TargetSelector | null, me: number | null, aux_bus: number | null, id: string | null, };
 
 export type OptionsMessage = { type: string, kind: string, items: Array<SelectItem>, connected: boolean, detail: string, };
 
