@@ -8,10 +8,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use necromancer::protocol::atom::InputProperties;
+use necromancer::protocol::atom::{InputProperties, MeAvailability, SourceAvailability};
 use necromancer::protocol::structs::{PortType, VideoSource};
-
-use crate::availability::{MeAvailability, SourceAvailability, StateAvailability};
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
 use serde_json::Value;
@@ -1373,10 +1371,10 @@ fn aux_source_ids(state: &AtemState, aux_bus: u8) -> Vec<u16> {
 mod tests {
     use std::collections::HashMap;
 
+    use necromancer::protocol::atom::{MeAvailability, SourceAvailability};
     use necromancer::protocol::structs::ExternalPortType;
 
     use super::*;
-    use crate::availability::InputAvailability;
 
     /// High byte is `SourceAvailability`, low byte is `MeAvailability`.
     fn properties(port: PortType, name: &str, source_bits: u8, me_bits: u8) -> InputProperties {
