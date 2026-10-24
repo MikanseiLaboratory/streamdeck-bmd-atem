@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LiveInstance } from "./bridge";
 import type { GlobalSettings, InstanceConfig, TargetGroup } from "./generated/contracts";
 
@@ -16,9 +16,18 @@ export function Configuration() {
   const [statuses, setStatuses] = useState<LiveInstance[]>([]);
   const [ready, setReady] = useState(false);
   const [missing, setMissing] = useState(false);
+  const settingsRef = useRef(settings);
+
+  const commit = (recipe: (current: GlobalSettings) => GlobalSettings) => {
+    const next = recipe(settingsRef.current);
+    settingsRef.current = next;
+    setSettings(next);
+    window.opener?.atemConfig?.setSettings(next);
+  };
 
   useEffect(() => {
     window.refreshAtemConfig = (next, instances) => {
+      settingsRef.current = next;
       setSettings(next);
       setStatuses(instances);
       setReady(true);
@@ -33,7 +42,9 @@ export function Configuration() {
     const attach = () => {
       const bridge = window.opener?.atemConfig;
       if (!bridge) return false;
-      setSettings(bridge.getSettings());
+      const loaded = bridge.getSettings();
+      settingsRef.current = loaded;
+      setSettings(loaded);
       unsubscribe = bridge.subscribe(setStatuses);
       setReady(true);
       return true;
@@ -54,13 +65,7 @@ export function Configuration() {
     };
   }, []);
 
-  const commit = (next: GlobalSettings) => {
-    setSettings(next);
-    window.opener?.atemConfig?.setSettings(next);
-  };
-
   const instances = settings.instances ?? [];
-  const updateInstances = (next: InstanceConfig[]) => commit({ ...settings, instances: next });
 
   if (missing) {
     return (
@@ -91,19 +96,32 @@ export function Configuration() {
               instance={instance}
               index={index}
               status={statuses.find((item) => item.id === instance.id)}
-              onChange={(next) => {
-                const copy = instances.slice();
-                copy[index] = next;
-                updateInstances(copy);
-              }}
-              onRemove={() => updateInstances(instances.filter((_, item) => item !== index))}
+              onChange={(next) =>
+                commit((current) => ({
+                  ...current,
+                  instances: current.instances.map((item) => (item.id === instance.id ? next : item)),
+                }))
+              }
+              onRemove={() =>
+                commit((current) => ({
+                  ...current,
+                  instances: current.instances.filter((item) => item.id !== instance.id),
+                  groups: (current.groups ?? []).map((group) => ({
+                    ...group,
+                    members: (group.members ?? []).filter((id) => id !== instance.id),
+                  })),
+                }))
+              }
               onReconnect={() => window.opener?.atemConfig?.reconnect(instance.id)}
               onDrop={(from) => {
                 if (from === index) return;
-                const copy = instances.slice();
-                const [moved] = copy.splice(from, 1);
-                copy.splice(index, 0, moved);
-                updateInstances(copy);
+                commit((current) => {
+                  const copy = current.instances.slice();
+                  const [moved] = copy.splice(from, 1);
+                  if (!moved) return current;
+                  copy.splice(index, 0, moved);
+                  return { ...current, instances: copy };
+                });
               }}
             />
           ))}
@@ -112,17 +130,20 @@ export function Configuration() {
           <button
             type="button"
             onClick={() =>
-              updateInstances([
-                ...instances,
-                {
-                  id: crypto.randomUUID(),
-                  name: `ATEM ${instances.length + 1}`,
-                  host: "",
-                  port: 9910,
-                  color: PALETTE[instances.length % PALETTE.length],
-                  enabled: true,
-                },
-              ])
+              commit((current) => ({
+                ...current,
+                instances: [
+                  ...current.instances,
+                  {
+                    id: crypto.randomUUID(),
+                    name: `ATEM ${current.instances.length + 1}`,
+                    host: "",
+                    port: 9910,
+                    color: PALETTE[current.instances.length % PALETTE.length],
+                    enabled: true,
+                  },
+                ],
+              }))
             }
           >
             Add ATEM
@@ -131,7 +152,11 @@ export function Configuration() {
             Reconnect all
           </button>
         </div>
-        <Groups instances={instances} groups={settings.groups ?? []} setGroups={(groups) => commit({ ...settings, groups })} />
+        <Groups
+          instances={instances}
+          groups={settings.groups ?? []}
+          setGroups={(recipe) => commit((current) => ({ ...current, groups: recipe(current.groups ?? []) }))}
+        />
       </div>
     </main>
   );
@@ -222,21 +247,20 @@ function Groups({
 }: {
   instances: InstanceConfig[];
   groups: TargetGroup[];
-  setGroups: (groups: TargetGroup[]) => void;
+  setGroups: (recipe: (groups: TargetGroup[]) => TargetGroup[]) => void;
 }) {
   return (
     <>
       <div className="sdpi-heading">Groups</div>
-      {groups.map((group, index) => (
+      {groups.map((group) => (
         <section className="obs-card" key={group.id}>
           <label className="field">
             Name
             <input
               value={group.name}
               onChange={(event) => {
-                const copy = groups.slice();
-                copy[index] = { ...group, name: event.target.value };
-                setGroups(copy);
+                const name = event.target.value;
+                setGroups((current) => current.map((item) => (item.id === group.id ? { ...item, name } : item)));
               }}
             />
           </label>
@@ -246,20 +270,28 @@ function Groups({
               {instances.length === 0 && <span>No switchers yet</span>}
               {instances.map((instance) => {
                 const id = `group-${group.id}-${instance.id}`;
-                const on = group.members.includes(instance.id);
+                const members = group.members ?? [];
+                const on = members.includes(instance.id);
                 return (
                   <div className="sdpi-item-child" key={instance.id}>
                     <input
                       id={id}
                       type="checkbox"
                       checked={on}
-                      onChange={() => {
-                        const members = on
-                          ? group.members.filter((member) => member !== instance.id)
-                          : [...group.members, instance.id];
-                        const copy = groups.slice();
-                        copy[index] = { ...group, members };
-                        setGroups(copy);
+                      onChange={(event) => {
+                        const include = event.target.checked;
+                        setGroups((current) =>
+                          current.map((item) => {
+                            if (item.id !== group.id) return item;
+                            const previous = item.members ?? [];
+                            const next = include
+                              ? previous.includes(instance.id)
+                                ? previous
+                                : [...previous, instance.id]
+                              : previous.filter((member) => member !== instance.id);
+                            return { ...item, members: next };
+                          }),
+                        );
                       }}
                     />
                     <label htmlFor={id}>
@@ -273,7 +305,7 @@ function Groups({
             </div>
           </div>
           <div className="card-actions">
-            <button type="button" onClick={() => setGroups(groups.filter((_, item) => item !== index))}>
+            <button type="button" onClick={() => setGroups((current) => current.filter((item) => item.id !== group.id))}>
               Remove group
             </button>
           </div>
@@ -282,7 +314,12 @@ function Groups({
       <div className="card-actions">
         <button
           type="button"
-          onClick={() => setGroups([...groups, { id: crypto.randomUUID(), name: `Group ${groups.length + 1}`, members: [] }])}
+          onClick={() =>
+            setGroups((current) => [
+              ...current,
+              { id: crypto.randomUUID(), name: `Group ${current.length + 1}`, members: [] },
+            ])
+          }
         >
           Add group
         </button>

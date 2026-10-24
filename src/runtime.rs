@@ -1023,12 +1023,12 @@ fn video_source_from_id(id: u16) -> VideoSource {
 
 fn me_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     let count = state
-        .map(|state| state.get_program_sources().len())
+        .map(|state| state.topology.mes)
         .filter(|count| *count > 0)
         .unwrap_or(4);
-    (0..count as u8)
+    (0..count)
         .map(|me| SelectItem {
-            label: format!("M/E {me}"),
+            label: format!("M/E {}", me + 1),
             value: me.to_string(),
         })
         .collect()
@@ -1079,6 +1079,10 @@ fn fallback_video_items() -> Vec<SelectItem> {
             label: "Color 2".into(),
             value: (VideoSource::Colour2 as u16).to_string(),
         },
+        SelectItem {
+            label: "SuperSource".into(),
+            value: (VideoSource::SuperSource as u16).to_string(),
+        },
     ];
     items.extend((1..=20).map(|id| SelectItem {
         label: format!("Input {id}"),
@@ -1090,7 +1094,11 @@ fn fallback_video_items() -> Vec<SelectItem> {
 fn selectable_port(port: PortType) -> bool {
     matches!(
         port,
-        PortType::External | PortType::Black | PortType::ColourBars | PortType::ColourGenerator
+        PortType::External
+            | PortType::Black
+            | PortType::ColourBars
+            | PortType::ColourGenerator
+            | PortType::SuperSource
     )
 }
 
@@ -1116,6 +1124,7 @@ fn fallback_source_label(id: u16) -> String {
         Some(VideoSource::Colour6) => "Color 6".into(),
         Some(VideoSource::Colour7) => "Color 7".into(),
         Some(VideoSource::Colour8) => "Color 8".into(),
+        Some(VideoSource::SuperSource) => "SuperSource".into(),
         _ => format!("Input {id}"),
     }
 }
@@ -1125,6 +1134,7 @@ fn source_rank(id: u16) -> u32 {
         0 => 0,
         1000 => 1,
         2001..=2008 => 10 + u32::from(id - 2000),
+        6000 => 20,
         1..=40 => 100 + u32::from(id),
         _ => 10_000 + u32::from(id),
     }
@@ -1223,6 +1233,27 @@ mod tests {
     }
 
     #[test]
+    fn me_labels_start_at_one_and_keep_the_protocol_index() {
+        let items = me_items(None);
+        assert_eq!(items[0].label, "M/E 1");
+        assert_eq!(items[0].value, "0");
+        assert_eq!(items[1].label, "M/E 2");
+        assert_eq!(items[1].value, "1");
+        assert_eq!(items.len(), 4);
+    }
+
+    #[test]
+    fn disconnected_aux_sources_include_inputs() {
+        let items = aux_video_items(None);
+        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+        assert!(values.contains(&"0"), "Black");
+        assert!(values.contains(&"1"), "Input 1");
+        assert!(values.contains(&"1000"), "Color Bars");
+        assert!(values.contains(&"10010"), "M/E 1 Program");
+        assert!(values.contains(&"10011"), "M/E 1 Preview");
+    }
+
+    #[test]
     fn disconnected_source_list_includes_black_and_color() {
         let items = video_items(None);
         let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
@@ -1230,6 +1261,7 @@ mod tests {
         assert!(values.contains(&"1000"), "Color Bars");
         assert!(values.contains(&"2001"), "Color 1");
         assert!(values.contains(&"2002"), "Color 2");
+        assert!(values.contains(&"6000"), "SuperSource");
         assert!(values.contains(&"1"));
         assert_eq!(items[0].label, "Black");
         assert_eq!(items[1].label, "Color Bars");
@@ -1252,9 +1284,17 @@ mod tests {
             VideoSource::MediaPlayer1,
             properties(PortType::MediaPlayerFill, "Media 1"),
         );
+        input_properties.insert(
+            VideoSource::SuperSource,
+            properties(PortType::SuperSource, "SuperSource"),
+        );
         let items = listed_sources(&input_properties);
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, vec!["Black", "Color Bars", "Color 1", "Cam 3"]);
-        assert_eq!(items[3].value, "3");
+        assert_eq!(
+            labels,
+            vec!["Black", "Color Bars", "Color 1", "SuperSource", "Cam 3"]
+        );
+        assert_eq!(items[4].value, "3");
+        assert_eq!(items[3].value, "6000");
     }
 }

@@ -487,5 +487,16 @@ mod tests {
             resolve_targets(&configs, &groups, &ActionSettings::default()),
             vec!["192.168.1.10".to_string(), "192.168.1.12".to_string()]
         );
+        let empty_group = ActionSettings {
+            target: Some(TargetSelector::Group {
+                id: "studio".into(),
+            }),
+            ..ActionSettings::default()
+        };
+        let empty_members = vec![TargetGroup {
+            members: Vec::new(),
+            ..groups[0].clone()
+        }];
+        assert!(resolve_targets(&configs, &empty_members, &empty_group).is_empty());
     }
 }

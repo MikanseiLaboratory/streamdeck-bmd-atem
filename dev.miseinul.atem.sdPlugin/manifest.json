@@ -30,7 +30,7 @@
     {
       "UUID": "dev.miseinul.atem.cut",
       "Icon": "Images/icon",
-      "Name": "ATEM Cut",
+      "Name": "Cut",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -46,7 +46,7 @@
     {
       "UUID": "dev.miseinul.atem.auto",
       "Icon": "Images/icon",
-      "Name": "ATEM Auto",
+      "Name": "Auto",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -62,7 +62,7 @@
     {
       "UUID": "dev.miseinul.atem.programinput",
       "Icon": "Images/icon",
-      "Name": "ATEM Program Input",
+      "Name": "Program Input",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -78,7 +78,7 @@
     {
       "UUID": "dev.miseinul.atem.previewinput",
       "Icon": "Images/icon",
-      "Name": "ATEM Preview Input",
+      "Name": "Preview Input",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -94,7 +94,7 @@
     {
       "UUID": "dev.miseinul.atem.cuttoblack",
       "Icon": "Images/icon",
-      "Name": "ATEM Cut to Black",
+      "Name": "Cut to Black",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -110,7 +110,7 @@
     {
       "UUID": "dev.miseinul.atem.fadetoblack",
       "Icon": "Images/icon",
-      "Name": "ATEM Fade to Black",
+      "Name": "Fade to Black",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -126,7 +126,7 @@
     {
       "UUID": "dev.miseinul.atem.auxoutput",
       "Icon": "Images/icon",
-      "Name": "ATEM AUX Output",
+      "Name": "AUX Output",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -149,7 +149,7 @@
     {
       "UUID": "dev.miseinul.atem.dskauto",
       "Icon": "Images/icon",
-      "Name": "ATEM DSK Auto",
+      "Name": "DSK Auto",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -165,7 +165,7 @@
     {
       "UUID": "dev.miseinul.atem.dskonair",
       "Icon": "Images/icon",
-      "Name": "ATEM DSK On Air",
+      "Name": "DSK On Air",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -181,7 +181,7 @@
     {
       "UUID": "dev.miseinul.atem.dskcut",
       "Icon": "Images/icon",
-      "Name": "ATEM DSK Cut Source",
+      "Name": "DSK Cut Source",
       "Controllers": [
         "Keypad",
         "Encoder"
@@ -197,7 +197,7 @@
     {
       "UUID": "dev.miseinul.atem.dskfill",
       "Icon": "Images/icon",
-      "Name": "ATEM DSK Fill Source",
+      "Name": "DSK Fill Source",
       "Controllers": [
         "Keypad",
         "Encoder"

@@ -87,11 +87,14 @@ export function App() {
 
   useEffect(() => {
     for (const listener of listenersRef.current) listener(statuses);
+  }, [statuses]);
+
+  useEffect(() => {
     const child = configWindowRef.current;
     if (child && !child.closed && child.opener === window) {
-      child.refreshAtemConfig?.(settingsRef.current, statuses);
+      child.refreshAtemConfig?.(settingsRef.current, statusRef.current);
     }
-  }, [statuses, global.settings]);
+  }, [global.settings]);
 
   useEffect(() => {
     sendToPlugin({ type: "ready" });
@@ -165,7 +168,7 @@ export function App() {
       <div className="sdpi-heading">ATEM</div>
       {fields.me && (
         <SelectField
-          label="ME (Mix Effect) index"
+          label="M/E"
           items={withCurrent(options.me, settings.me)}
           value={asText(settings.me)}
           onChange={(value) => setNumber("me", value)}
@@ -374,7 +377,12 @@ function SelectField({
 function fieldsFor(action: string) {
   return {
     me: action.endsWith(".cut") || action.endsWith(".auto") || action.endsWith(".programinput") || action.endsWith(".previewinput") || action.endsWith(".cuttoblack") || action.endsWith(".fadetoblack"),
-    video: action.endsWith(".programinput") || action.endsWith(".previewinput") || action.endsWith(".dskcut") || action.endsWith(".dskfill"),
+    video:
+      action.endsWith(".programinput") ||
+      action.endsWith(".previewinput") ||
+      action.endsWith(".auxoutput") ||
+      action.endsWith(".dskcut") ||
+      action.endsWith(".dskfill"),
     aux: action.endsWith(".auxoutput"),
     dsk: action.includes(".dsk"),
     onAir: action.endsWith(".dskonair"),
