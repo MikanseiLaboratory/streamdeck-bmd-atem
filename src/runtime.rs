@@ -29,6 +29,13 @@ const IMAGE_RED: &str = "Images/red.png";
 const IMAGE_GREEN: &str = "Images/green.png";
 const IMAGE_GRAY: &str = "Images/gray.png";
 
+/// Offline mix-effect count for an ATEM Mini, which has a single M/E.
+/// A connected switcher uses `topology.mes` instead, and the value stays the protocol index.
+const OFFLINE_ME_COUNT: u8 = 1;
+
+/// Offline inputs for an ATEM Mini: four HDMI inputs.
+const OFFLINE_HDMI_INPUTS: u16 = 4;
+
 const ME_PROGRAM_PREVIEW: [(u16, &str); 8] = [
     (10010, "M/E 1 Program"),
     (10011, "M/E 1 Preview"),
@@ -1025,7 +1032,7 @@ fn me_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     let count = state
         .map(|state| state.topology.mes)
         .filter(|count| *count > 0)
-        .unwrap_or(4);
+        .unwrap_or(OFFLINE_ME_COUNT);
     (0..count)
         .map(|me| SelectItem {
             label: format!("M/E {}", me + 1),
@@ -1061,6 +1068,15 @@ fn listed_sources<'a>(
         .collect()
 }
 
+/// Sources available on an ATEM Mini when no switcher state has arrived.
+///
+/// Values are necromancer `VideoSource` discriminants, which are the protocol IDs a
+/// connected switcher reports in `input_properties`:
+/// Black 0, HDMI inputs 1–4, colour bars 1000, colour generators 2001 and 2002,
+/// media player 1 fill 3010 and its key output 3011.
+/// The Mini input table exposes that key as its own routable source
+/// (`PortType::MediaPlayerKey`). The Mini has no SuperSource; a connected
+/// switcher that does have one still lists it from `input_properties`.
 fn fallback_video_items() -> Vec<SelectItem> {
     let mut items = vec![
         SelectItem {
@@ -1080,17 +1096,26 @@ fn fallback_video_items() -> Vec<SelectItem> {
             value: (VideoSource::Colour2 as u16).to_string(),
         },
         SelectItem {
-            label: "SuperSource".into(),
-            value: (VideoSource::SuperSource as u16).to_string(),
+            label: "Media Player 1".into(),
+            value: (VideoSource::MediaPlayer1 as u16).to_string(),
+        },
+        SelectItem {
+            label: "Media Player 1 Key".into(),
+            value: (VideoSource::MediaPlayer1Key as u16).to_string(),
         },
     ];
-    items.extend((1..=20).map(|id| SelectItem {
+    items.extend((1..=OFFLINE_HDMI_INPUTS).map(|id| SelectItem {
         label: format!("Input {id}"),
         value: id.to_string(),
     }));
     items
 }
 
+/// Ports an operator can route onto program, preview, a downstream keyer, or an auxiliary bus.
+///
+/// Media player fill and key are routable video sources on switchers that have them
+/// (program/preview, DSK fill/cut, and AUX). Output-only ports stay out of these menus;
+/// M/E program and preview are appended separately for AUX.
 fn selectable_port(port: PortType) -> bool {
     matches!(
         port,
@@ -1098,6 +1123,8 @@ fn selectable_port(port: PortType) -> bool {
             | PortType::Black
             | PortType::ColourBars
             | PortType::ColourGenerator
+            | PortType::MediaPlayerFill
+            | PortType::MediaPlayerKey
             | PortType::SuperSource
     )
 }
@@ -1124,6 +1151,14 @@ fn fallback_source_label(id: u16) -> String {
         Some(VideoSource::Colour6) => "Color 6".into(),
         Some(VideoSource::Colour7) => "Color 7".into(),
         Some(VideoSource::Colour8) => "Color 8".into(),
+        Some(VideoSource::MediaPlayer1) => "Media Player 1".into(),
+        Some(VideoSource::MediaPlayer1Key) => "Media Player 1 Key".into(),
+        Some(VideoSource::MediaPlayer2) => "Media Player 2".into(),
+        Some(VideoSource::MediaPlayer2Key) => "Media Player 2 Key".into(),
+        Some(VideoSource::MediaPlayer3) => "Media Player 3".into(),
+        Some(VideoSource::MediaPlayer3Key) => "Media Player 3 Key".into(),
+        Some(VideoSource::MediaPlayer4) => "Media Player 4".into(),
+        Some(VideoSource::MediaPlayer4Key) => "Media Player 4 Key".into(),
         Some(VideoSource::SuperSource) => "SuperSource".into(),
         _ => format!("Input {id}"),
     }
@@ -1134,7 +1169,8 @@ fn source_rank(id: u16) -> u32 {
         0 => 0,
         1000 => 1,
         2001..=2008 => 10 + u32::from(id - 2000),
-        6000 => 20,
+        3010..=3041 => 30 + u32::from(id - 3010),
+        6000 => 80,
         1..=40 => 100 + u32::from(id),
         _ => 10_000 + u32::from(id),
     }
@@ -1155,7 +1191,10 @@ fn aux_items(state: Option<&AtemState>) -> Vec<SelectItem> {
 
 fn aux_video_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     let mut items = video_items(state);
-    let me_count = state.map(|state| state.topology.mes as usize).unwrap_or(2);
+    let me_count = state
+        .map(|state| state.topology.mes as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or(OFFLINE_ME_COUNT as usize);
     for (value, label) in ME_PROGRAM_PREVIEW.iter().take(me_count.saturating_mul(2)) {
         items.push(SelectItem {
             label: (*label).to_string(),
@@ -1202,8 +1241,8 @@ fn aux_source_ids(state: &AtemState) -> Vec<u16> {
             .map(|(id, _)| *id),
     );
     if ids.is_empty() {
-        ids = (1..=20).collect();
-        ids.extend([10010, 10011, 10020, 10021]);
+        ids = input_ids(None);
+        ids.extend([10010, 10011]);
     }
     ids
 }
@@ -1235,40 +1274,61 @@ mod tests {
     #[test]
     fn me_labels_start_at_one_and_keep_the_protocol_index() {
         let items = me_items(None);
-        assert_eq!(items[0].label, "M/E 1");
-        assert_eq!(items[0].value, "0");
-        assert_eq!(items[1].label, "M/E 2");
-        assert_eq!(items[1].value, "1");
-        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items,
+            vec![SelectItem {
+                label: "M/E 1".into(),
+                value: "0".into(),
+            }]
+        );
     }
 
     #[test]
-    fn disconnected_aux_sources_include_inputs() {
+    fn disconnected_aux_sources_follow_the_mini_baseline() {
         let items = aux_video_items(None);
         let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert!(values.contains(&"0"), "Black");
-        assert!(values.contains(&"1"), "Input 1");
-        assert!(values.contains(&"1000"), "Color Bars");
-        assert!(values.contains(&"10010"), "M/E 1 Program");
-        assert!(values.contains(&"10011"), "M/E 1 Preview");
-    }
-
-    #[test]
-    fn disconnected_source_list_includes_black_and_color() {
-        let items = video_items(None);
-        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert!(values.contains(&"0"), "Black");
-        assert!(values.contains(&"1000"), "Color Bars");
-        assert!(values.contains(&"2001"), "Color 1");
-        assert!(values.contains(&"2002"), "Color 2");
-        assert!(values.contains(&"6000"), "SuperSource");
+        let video = video_items(None);
+        assert_eq!(items.len(), video.len() + 2);
+        assert_eq!(values[values.len() - 2], "10010");
+        assert_eq!(items[items.len() - 2].label, "M/E 1 Program");
+        assert_eq!(values[values.len() - 1], "10011");
+        assert_eq!(items[items.len() - 1].label, "M/E 1 Preview");
+        assert!(values.contains(&"3010"));
+        assert!(values.contains(&"3011"));
         assert!(values.contains(&"1"));
-        assert_eq!(items[0].label, "Black");
-        assert_eq!(items[1].label, "Color Bars");
+        assert!(values.contains(&"4"));
     }
 
     #[test]
-    fn connected_source_list_uses_switcher_names_and_skips_other_ports() {
+    fn disconnected_source_list_matches_atem_mini_ids() {
+        let items = video_items(None);
+        let pairs: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| (item.label.as_str(), item.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Black", "0"),
+                ("Color Bars", "1000"),
+                ("Color 1", "2001"),
+                ("Color 2", "2002"),
+                ("Media Player 1", "3010"),
+                ("Media Player 1 Key", "3011"),
+                ("Input 1", "1"),
+                ("Input 2", "2"),
+                ("Input 3", "3"),
+                ("Input 4", "4"),
+            ]
+        );
+        assert_eq!(VideoSource::MediaPlayer1 as u16, 3010);
+        assert_eq!(VideoSource::MediaPlayer1Key as u16, 3011);
+        assert_eq!(VideoSource::Input1 as u16, 1);
+        assert_eq!(VideoSource::Input4 as u16, 4);
+    }
+
+    #[test]
+    fn connected_source_list_uses_switcher_names_and_includes_media_players() {
         let mut input_properties = HashMap::new();
         input_properties.insert(VideoSource::Input3, properties(PortType::External, "Cam 3"));
         input_properties.insert(VideoSource::Black, properties(PortType::Black, "Black"));
@@ -1285,16 +1345,34 @@ mod tests {
             properties(PortType::MediaPlayerFill, "Media 1"),
         );
         input_properties.insert(
+            VideoSource::MediaPlayer1Key,
+            properties(PortType::MediaPlayerKey, "Media 1 Key"),
+        );
+        input_properties.insert(
             VideoSource::SuperSource,
             properties(PortType::SuperSource, "SuperSource"),
+        );
+        input_properties.insert(
+            VideoSource::Auxilary1,
+            properties(PortType::Auxiliary, "Output"),
         );
         let items = listed_sources(&input_properties);
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Black", "Color Bars", "Color 1", "SuperSource", "Cam 3"]
+            vec![
+                "Black",
+                "Color Bars",
+                "Color 1",
+                "Media 1",
+                "Media 1 Key",
+                "SuperSource",
+                "Cam 3",
+            ]
         );
-        assert_eq!(items[4].value, "3");
-        assert_eq!(items[3].value, "6000");
+        assert_eq!(items[3].value, "3010");
+        assert_eq!(items[4].value, "3011");
+        assert_eq!(items[5].value, "6000");
+        assert_eq!(items[6].value, "3");
     }
 }
