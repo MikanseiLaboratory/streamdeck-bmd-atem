@@ -40,6 +40,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Test
+        run: cargo test --lib
+        env:
+          CARGO_TERM_COLOR: always
+
       - name: Build release binary (${{ matrix.target }})
         run: cargo build --release --target ${{ matrix.target }}
         env:
@@ -79,6 +84,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Build Property Inspector
+        working-directory: pi
+        run: npm ci && npm run build
 
       - name: Install Stream Deck CLI
         run: npm install -g @elgato/cli@latest

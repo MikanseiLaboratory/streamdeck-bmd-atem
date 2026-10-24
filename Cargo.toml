@@ -1,17 +1,31 @@
 [package]
 name = "streamdeck-atem"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
+rust-version = "1.85"
 description = "Stream Deck plugin for Blackmagic ATEM control"
 license = "Apache-2.0"
 
+[lib]
+name = "streamdeck_atem"
+path = "src/lib.rs"
+
+[[bin]]
+name = "streamdeck-atem"
+path = "src/main.rs"
+
+[[bin]]
+name = "typegen"
+path = "src/bin/typegen.rs"
+
 [dependencies]
-streamdeck-rs = { git = "https://github.com/FlowingSPDG/streamdeck-rs", rev = "4bdee355f5135a10cfc949d50efb675434cc2919" }
-necromancer = { git = "https://github.com/Incomplete-Outputs-Lab/necromancer", branch = "feat/streamdeck" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+anyhow = "1"
+necromancer = { git = "https://github.com/MikanseiLaboratory/necromancer", rev = "aee784e7db4dd32c890aa07491c10f92bf203611" }
+num-traits = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+streamdeck-plugin = { git = "https://github.com/MikanseiLaboratory/StreamDeckPluginRust", rev = "943e9b7e63a898de3e45012a2730d2c4ae34327a", features = ["macros", "typegen"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+ts-rs = "10.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures = "0.3"
-num-traits = "0.2"
