@@ -8,7 +8,7 @@
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
   "Name": "ATEM Control",
-  "Version": "0.2.1.0",
+  "Version": "0.2.2.0",
   "UUID": "dev.miseinul.atem",
   "OS": [
     {
