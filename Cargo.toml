@@ -20,7 +20,7 @@ path = "src/bin/typegen.rs"
 
 [dependencies]
 anyhow = "1"
-necromancer = { git = "https://github.com/Incomplete-Outputs-Lab/necromancer", branch = "feat/streamdeck" }
+necromancer = { git = "https://github.com/MikanseiLaboratory/necromancer", rev = "aee784e7db4dd32c890aa07491c10f92bf203611" }
 num-traits = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,6 +29,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-util = "0.7"
 ts-rs = "10.1"
 tracing = "0.1"
-
-[patch."https://github.com/Incomplete-Outputs-Lab/necromancer"]
-necromancer_protocol = { path = "third_party/necromancer_protocol" }

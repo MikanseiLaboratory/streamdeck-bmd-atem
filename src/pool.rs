@@ -593,7 +593,9 @@ mod tests {
             let error = version.check_firmware_version().unwrap_err();
             let text = error.to_string();
             assert!(
-                text.contains(&format!("{}.{}", version.major, version.minor)),
+                text.contains("unsupported firmware version")
+                    && text.contains(&format!("major: {}", version.major))
+                    && text.contains(&format!("minor: {}", version.minor)),
                 "{text}"
             );
         }

@@ -4,7 +4,7 @@
 
 Key characteristics:
 
-- Uses [`necromancer`](https://github.com/Incomplete-Outputs-Lab/necromancer) (`feat/streamdeck`) for ATEM protocol and state management. `necromancer_protocol` is vendored in `third_party/necromancer_protocol` (upstream `fe286387`) so protocol 2.32 passes the firmware check. Upstream still rejects minor versions above 31.
+- Uses [`necromancer`](https://github.com/MikanseiLaboratory/necromancer) (`feat/streamdeck` @ `aee784e7`) for ATEM protocol and state management. That commit accepts protocol 2.30–2.32. The protocol crate is not vendored.
 - Uses [`StreamDeckPluginRust`](https://github.com/MikanseiLaboratory/StreamDeckPluginRust) (`streamdeck-plugin`) for the Stream Deck WebSocket host, action registry, and TypeScript contract export.
 - The Property Inspector is a React app in `pi/`, built with [`@mikanseilaboratory/streamdeck-pi-client`](https://github.com/MikanseiLaboratory/streamdeck-pi-client). `cargo run --bin typegen` writes `pi/src/generated/contracts.ts`. Vite emits `dev.miseinul.atem.sdPlugin/ui/`.
 - Keeps one supervised ATEM session per catalog entry (`src/pool.rs`). Instances and groups are edited in a separate configuration window, the same way as the HyperDeck, vMix, and OBS plugins. Each entry is Disabled, Connecting, Connected, or Disconnected with a message.

@@ -88,7 +88,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5910da05ee556b789032c8ff5a61fb99239580aa3fd0bfaa8f4d094b2aee00ad"
 dependencies = [
  "either",
- "owo-colors",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -588,7 +587,7 @@ dependencies = [
 [[package]]
 name = "necromancer"
 version = "0.0.0"
-source = "git+https://github.com/Incomplete-Outputs-Lab/necromancer?branch=feat%2Fstreamdeck#fe28638751ac545740fe5dd371c2d88207846fcd"
+source = "git+https://github.com/MikanseiLaboratory/necromancer?rev=aee784e7db4dd32c890aa07491c10f92bf203611#aee784e7db4dd32c890aa07491c10f92bf203611"
 dependencies = [
  "binrw",
  "bitflags",
@@ -608,6 +607,7 @@ dependencies = [
 [[package]]
 name = "necromancer_protocol"
 version = "0.0.0"
+source = "git+https://github.com/MikanseiLaboratory/necromancer?rev=aee784e7db4dd32c890aa07491c10f92bf203611#aee784e7db4dd32c890aa07491c10f92bf203611"
 dependencies = [
  "binrw",
  "chrono",
@@ -655,12 +655,6 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
-
-[[package]]
-name = "owo-colors"
-version = "4.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "palette"
