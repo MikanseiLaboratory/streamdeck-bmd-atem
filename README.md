@@ -3,7 +3,7 @@
 Cross-platform Stream Deck plugin for **Blackmagic ATEM** control. Built with Rust.
 
 - **ATEM connection window** – switchers and groups are edited in a separate window, as in the HyperDeck, vMix, and OBS plugins. Each switcher keeps a supervised session with reconnect backoff.
-- **Multiple dedicated actions** – Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, and downstream keyer controls.
+- **Multiple dedicated actions** – Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, downstream keyer controls, and media player source selection.
 - **Typed Property Inspector** – one React inspector, generated from the Rust settings contract, sets the ATEM IP and the fields each action needs.
 - **Live state in PI** – ATEM connection status and input lists are pushed to the open inspector.
 - **Program/Preview key colours** – Program/Preview action keys change colour based on the *actual* ATEM bus state (Program vs Preview), using ATEM state rather than local plugin state.
@@ -22,7 +22,7 @@ cd pi && npm install && npm run build
 
 ## Usage
 
-1. Add one of the **ATEM actions** (Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, DSK) to your Stream Deck profile.
+1. Add one of the **ATEM actions** (Cut, Auto, Program, Preview, Cut to Black, Fade to Black, AUX, DSK, Media Player) to your Stream Deck profile.
 2. Open the **Property Inspector** for that key.
 3. Choose **Send to**. The list contains every switcher and group, plus **Multiple switchers** when a key should hit more than one. Open **Manage instances** to add switchers (name, host, port) and groups in a separate window.
 4. For **Program/Preview**, AUX, and DSK source actions, also set the **Video source**. The list includes Black, color bars, and color generators. While the switcher is connected those rows, including their names, come from the ATEM. Use one key per input you care about.
@@ -31,6 +31,8 @@ cd pi && npm install && npm run build
 7. For Program/Preview actions, key colours follow the ATEM:
    - Program Input keys: active input = red, inactive = gray.
    - Preview Input keys: active input = green, inactive = gray.
+8. **Media Player** actions set what a media player plays. Pick the player, the bank (**Still** or **Clip**), and the slot. Still slots are labelled with the name typed on the ATEM and update as soon as the switcher reports them; clips have no name in the protocol, so they stay numbered. The key and the encoder touch strip show the current slot name. Turning the dial steps to the next or previous still (or clip), skipping empty still slots, and pressing loads the configured slot.
+   - Stream Deck clips the encoder touch strip at about 16 characters. Long still names are shortened with `…`.
 
 ## License
 

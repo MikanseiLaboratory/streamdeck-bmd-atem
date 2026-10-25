@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use necromancer::protocol::atom::InputProperties;
+use necromancer::protocol::atom::{InputProperties, MediaPlayerSourceID};
 use necromancer::protocol::structs::{PortType, VideoSource};
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
@@ -21,13 +21,24 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use crate::contracts::{
     cycle_index, merge_catalog, normalized_ip, resolve_targets, ActionSettings, AtemStateMessage,
     ConnectionState, GlobalSettings, InspectorCommand, InstanceConfig, InstanceStatusMessage,
-    OptionsMessage, SelectItem, StatusMessage,
+    MediaKind, OptionsMessage, SelectItem, StatusMessage,
 };
 use crate::pool::{AtemInstanceConfig, AtemPool, ConnectionStatus, PoolEvent, PoolOptions};
 
 const IMAGE_RED: &str = "Images/red.png";
 const IMAGE_GREEN: &str = "Images/green.png";
 const IMAGE_GRAY: &str = "Images/gray.png";
+
+/// UUID of the media player action, used by the title and tally helpers.
+const MEDIA_PLAYER_ACTION: &str = "dev.miseinul.atem.mediaplayer";
+
+/// State changes that reshape the media pool: player count, still/clip banks, and
+/// the per-slot descriptions the switcher sends once it is connected.
+const MEDIA_PLAYER_TOPOLOGY: StateUpdate = StateUpdate::from_bits_truncate(
+    StateUpdate::MEDIA_PLAYER_CAPABILITIES.bits()
+        | StateUpdate::MEDIA_PLAYER_FRAME_DESCRIPTION.bits()
+        | StateUpdate::MEDIA_PLAYER_SOURCE.bits(),
+);
 
 const ME_PROGRAM_PREVIEW: [(u16, &str); 8] = [
     (10010, "M/E 1 Program"),
@@ -99,6 +110,32 @@ impl AppState {
             .await;
         self.runtime.ensure_legacy_instance(settings).await;
         self.runtime.refresh_settings(settings).await;
+        self.refresh_media_title(action, context, settings).await;
+    }
+
+    /// Name the media player key before the switcher reports anything.
+    async fn refresh_media_title(&self, action: &str, context: &str, settings: &ActionSettings) {
+        if action != MEDIA_PLAYER_ACTION {
+            return;
+        }
+        let state = {
+            let global = self.runtime.global.read().await.clone();
+            let mut found = None;
+            for id in resolve_targets(&global.instances, &global.groups, settings) {
+                let Some(instance) = global.instances.iter().find(|item| item.id == id) else {
+                    continue;
+                };
+                if let Some(controller) =
+                    self.runtime.pool.controller_for_host(&instance.host).await
+                {
+                    found = Some(controller.get_state().await);
+                    break;
+                }
+            }
+            found
+        };
+        let title = media_title(state.as_deref(), settings);
+        self.runtime.set_title(context, &title).await;
     }
 
     pub async fn on_will_disappear(&self, context: &str) {
@@ -410,6 +447,122 @@ impl AppState {
         } else if kind == DskKind::Auto {
             self.runtime.set_image(context, IMAGE_RED).await;
         }
+    }
+
+    /// Load the configured still or clip into the media player.
+    pub async fn press_media(&self, context: &str, settings: &ActionSettings) {
+        let targets = self.targets_for(context, settings, true).await;
+        if targets.is_empty() {
+            return;
+        }
+        let player = settings.media_player.unwrap_or(0);
+        let mut failed = false;
+        for target in &targets {
+            let state = target.controller.get_state().await;
+            let Some(source) = requested_media_source(&state, settings) else {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM media player {} has no bank for this source on {}",
+                        player + 1,
+                        target.label
+                    ))
+                    .await;
+                continue;
+            };
+            if let Err(error) = target
+                .controller
+                .set_media_player_source(player, source)
+                .await
+            {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM media player change failed on {} (player={player}, source={source:?}): {error}",
+                        target.label
+                    ))
+                    .await;
+                continue;
+            }
+            let state = target.controller.get_state().await;
+            self.runtime.refresh_media(&target.host, &state).await;
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
+        }
+    }
+
+    /// Step the media player to the next or previous slot and return the settings to save.
+    ///
+    /// Empty still slots are skipped: the switcher refuses them and the operator meant
+    /// to walk through loaded graphics.
+    pub async fn rotate_media(
+        &self,
+        context: &str,
+        settings: &ActionSettings,
+        ticks: i64,
+    ) -> Option<ActionSettings> {
+        let targets = self.targets_for(context, settings, true).await;
+        let first = targets.first()?;
+        let player = settings.media_player.unwrap_or(0);
+        let state = first.controller.get_state().await;
+        let Some(source) = requested_media_source(&state, settings) else {
+            self.runtime.show_alert(context).await;
+            return None;
+        };
+        let bank = match source {
+            MediaPlayerSourceID::Still(_) => MediaKind::Still,
+            MediaPlayerSourceID::VideoClip(_) => MediaKind::Clip,
+        };
+        let len = media_count(&state, bank);
+        if len == 0 {
+            self.runtime.show_alert(context).await;
+            return None;
+        }
+        let current = usize::from(media_source_index(source)).min(len - 1);
+        let step = if ticks < 0 { -1 } else { 1 };
+        let new_index = match next_slot(&state, bank, current, step) {
+            Some(index) => index,
+            None => {
+                self.runtime
+                    .log(&format!(
+                        "ATEM media player {} has no other {} slots to step to",
+                        player + 1,
+                        bank_value(bank)
+                    ))
+                    .await;
+                self.runtime.show_alert(context).await;
+                return None;
+            }
+        };
+        let next_source = media_source(bank, new_index);
+        let mut failed = false;
+        for target in &targets {
+            if let Err(error) = target
+                .controller
+                .set_media_player_source(player, next_source)
+                .await
+            {
+                failed = true;
+                self.runtime
+                    .log(&format!(
+                        "ATEM media player dial failed on {} (player={player}, source={next_source:?}): {error}",
+                        target.label
+                    ))
+                    .await;
+            }
+        }
+        if failed {
+            self.runtime.show_alert(context).await;
+        }
+        let mut updated = settings.clone();
+        updated.media_player = Some(player);
+        updated.media_kind = Some(bank);
+        updated.media_index = Some(new_index);
+        if let Some(record) = self.runtime.keys.write().await.get_mut(context) {
+            record.settings = updated.clone();
+        }
+        Some(updated)
     }
 
     async fn targets_for(
@@ -753,6 +906,13 @@ impl Runtime {
         if updated.intersects(StateUpdate::INPUT_PROPERTIES) {
             self.push_options_for_ip(ip, "").await;
         }
+        // Stills arrive after the topology, one `MPfe` at a time, so the media lists
+        // and key titles are rebuilt whenever one lands.
+        if updated.intersects(MEDIA_PLAYER_TOPOLOGY) {
+            let state = controller.get_state().await;
+            self.refresh_media(ip, &state).await;
+            self.push_options_for_ip(ip, "").await;
+        }
     }
 
     async fn notify_ip(&self, ip: &str, connected: bool, detail: &str) {
@@ -848,6 +1008,7 @@ impl Runtime {
         self.refresh_auto(ip, &state).await;
         self.refresh_dsk_on_air(ip, &state).await;
         self.refresh_dsk_auto(ip, &state).await;
+        self.refresh_media(ip, &state).await;
     }
 
     async fn refresh_program_preview(&self, ip: &str, state: &AtemState, program: bool) {
@@ -907,6 +1068,24 @@ impl Runtime {
         }
     }
 
+    /// Rename the media player keys and encoders from the switcher's media pool.
+    ///
+    /// Stills use the name typed on the ATEM; clips have no name on the wire, so the
+    /// slot number stays. There is no tally here: the key names its source instead.
+    async fn refresh_media(&self, ip: &str, state: &AtemState) {
+        for (context, settings) in self.keys_for(MEDIA_PLAYER_ACTION, ip).await {
+            let title = media_title(Some(state), &settings);
+            self.set_title(&context, &title).await;
+        }
+    }
+
+    async fn set_title(&self, context: &str, title: &str) {
+        let guard = self.sender.lock().await;
+        if let Some(sender) = guard.as_ref() {
+            let _ = sender.set_title(context, Some(title), Target::HardwareAndSoftware, None);
+        }
+    }
+
     async fn keys_for(&self, action: &str, host: &str) -> Vec<(String, ActionSettings)> {
         let records: Vec<(String, ActionSettings)> = self
             .keys
@@ -955,6 +1134,22 @@ impl Runtime {
             "aux" => aux_items(state_ref),
             "auxVideo" => aux_video_items(state_ref),
             "dsk" => dsk_items(state_ref),
+            "mediaPlayer" | "mediaBank" | "mediaIndex" => {
+                let bank = settings
+                    .media_kind
+                    .or_else(|| {
+                        state_ref.and_then(|state| {
+                            current_bank(state, settings.media_player.unwrap_or(0))
+                        })
+                    })
+                    .unwrap_or(MediaKind::Still);
+                let view = media_view(state_ref, bank);
+                match kind {
+                    "mediaPlayer" => view.players,
+                    "mediaBank" => view.banks,
+                    _ => view.slots,
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -1013,7 +1208,61 @@ fn option_kinds(action: &str) -> &'static [&'static str] {
         "dev.miseinul.atem.auxoutput" => &["aux", "auxVideo"],
         "dev.miseinul.atem.dskauto" | "dev.miseinul.atem.dskonair" => &["dsk"],
         "dev.miseinul.atem.dskcut" | "dev.miseinul.atem.dskfill" => &["dsk", "video"],
+        "dev.miseinul.atem.mediaplayer" => &["mediaPlayer", "mediaBank", "mediaIndex"],
         _ => &[],
+    }
+}
+
+/// One switcher's media topology, used by the media player inspector lists.
+#[derive(Default)]
+struct MediaView {
+    players: Vec<SelectItem>,
+    banks: Vec<SelectItem>,
+    slots: Vec<SelectItem>,
+}
+
+/// Build the media lists for `bank`, falling back to a single ATEM Mini player.
+fn media_view(state: Option<&AtemState>, bank: MediaKind) -> MediaView {
+    let players = state
+        .map(|state| usize::from(state.topology.media_players))
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    let banks: Vec<SelectItem> = [MediaKind::Still, MediaKind::Clip]
+        .into_iter()
+        .filter(|candidate| state.is_none_or(|state| media_count(state, *candidate) > 0))
+        .map(|candidate| SelectItem {
+            label: match candidate {
+                MediaKind::Still => "Still".to_string(),
+                MediaKind::Clip => "Clip".to_string(),
+            },
+            value: bank_value(candidate).to_string(),
+        })
+        .collect();
+    let slots = state
+        .map(|state| media_count(state, bank))
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    MediaView {
+        players: (0..players)
+            .map(|player| SelectItem {
+                label: format!("Media Player {}", player + 1),
+                value: player.to_string(),
+            })
+            .collect(),
+        banks,
+        slots: (0..slots)
+            .map(|index| SelectItem {
+                label: media_slot_label(state, bank, index as u8),
+                value: index.to_string(),
+            })
+            .collect(),
+    }
+}
+
+fn bank_value(bank: MediaKind) -> &'static str {
+    match bank {
+        MediaKind::Still => "still",
+        MediaKind::Clip => "clip",
     }
 }
 
@@ -1168,6 +1417,174 @@ fn aux_video_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     items
 }
 
+/// Longest label the encoder touch strip shows without being cut off.
+const TITLE_MAX_CHARS: usize = 16;
+
+/// Bank a media player currently plays from, if the switcher has told us.
+fn current_bank(state: &AtemState, player: u8) -> Option<MediaKind> {
+    match state.get_media_player_source(player)? {
+        MediaPlayerSourceID::Still(_) => Some(MediaKind::Still),
+        MediaPlayerSourceID::VideoClip(_) => Some(MediaKind::Clip),
+    }
+}
+
+/// Source id for `bank`/`index`, matching the protocol encoding necromancer uses.
+fn media_source(bank: MediaKind, index: u8) -> MediaPlayerSourceID {
+    match bank {
+        MediaKind::Still => MediaPlayerSourceID::Still(index),
+        MediaKind::Clip => MediaPlayerSourceID::VideoClip(index),
+    }
+}
+
+/// Index the source points at inside its bank.
+fn media_source_index(source: MediaPlayerSourceID) -> u8 {
+    match source {
+        MediaPlayerSourceID::Still(index) | MediaPlayerSourceID::VideoClip(index) => index,
+    }
+}
+
+/// Next slot in `direction` that the switcher can actually play.
+///
+/// Returns `None` when the only populated slot is the current one.
+fn next_slot(state: &AtemState, bank: MediaKind, current: usize, direction: i64) -> Option<u8> {
+    let len = media_count(state, bank);
+    if len == 0 {
+        return None;
+    }
+    let mut index = current;
+    for _ in 0..len {
+        let stepped = ((index as i64 + direction).rem_euclid(len as i64)) as usize;
+        index = stepped;
+        if index == current {
+            break;
+        }
+        if media_slot_playable(state, bank, index as u8) {
+            return Some(index as u8);
+        }
+    }
+    None
+}
+
+/// Whether `index` holds something the switcher will load.
+fn media_slot_playable(state: &AtemState, bank: MediaKind, index: u8) -> bool {
+    match bank {
+        MediaKind::Still => state
+            .media_player_frame_descriptions
+            .get(&index)
+            .is_none_or(|frame| frame.is_valid),
+        MediaKind::Clip => true,
+    }
+}
+
+/// Number of slots the switcher reports for `bank`.
+fn media_count(state: &AtemState, bank: MediaKind) -> usize {
+    match bank {
+        MediaKind::Still => usize::from(state.media_player_capabilities.still_count),
+        MediaKind::Clip => usize::from(state.media_player_capabilities.clip_count),
+    }
+}
+
+/// Bank that holds `index`, preferring `preferred` when both banks are long enough.
+fn bank_for_index(state: &AtemState, preferred: Option<MediaKind>, index: u8) -> Option<MediaKind> {
+    let banks = [preferred, Some(MediaKind::Still), Some(MediaKind::Clip)];
+    banks
+        .into_iter()
+        .flatten()
+        .find(|bank| usize::from(index) < media_count(state, *bank))
+}
+
+/// Label for one slot of a media bank.
+///
+/// Stills carry the name typed on the ATEM; clips do not, so they fall back to the
+/// slot number. Empty still slots say so instead of showing a bare index.
+fn media_slot_label(state: Option<&AtemState>, bank: MediaKind, index: u8) -> String {
+    let fallback = match bank {
+        MediaKind::Still => format!("Still {}", index + 1),
+        MediaKind::Clip => format!("Clip {}", index + 1),
+    };
+    let Some(state) = state else {
+        return fallback;
+    };
+    match bank {
+        MediaKind::Still => match state.media_player_frame_descriptions.get(&index) {
+            Some(frame) if frame.is_valid => {
+                let name = frame.name.trim();
+                if name.is_empty() {
+                    fallback
+                } else {
+                    name.to_string()
+                }
+            }
+            Some(_) => "Empty".to_string(),
+            None => fallback,
+        },
+        MediaKind::Clip => fallback,
+    }
+}
+
+/// Bank an untouched key starts on.
+///
+/// Stills win because that is what media players ship loaded with, unless the
+/// switcher reports no still bank at all.
+fn default_bank(state: &AtemState, player: u8) -> MediaKind {
+    current_bank(state, player).unwrap_or_else(|| {
+        if media_count(state, MediaKind::Still) > 0 {
+            MediaKind::Still
+        } else {
+            MediaKind::Clip
+        }
+    })
+}
+
+/// Source id the action asks for.
+///
+/// A configured `media_kind` wins. Without one the bank follows the slot the action
+/// points at: the switcher's current bank for an untouched key, and whatever bank
+/// already contains a moved-to index after dialling.
+fn requested_media_source(
+    state: &AtemState,
+    settings: &ActionSettings,
+) -> Option<MediaPlayerSourceID> {
+    let index = settings.media_index.unwrap_or(0);
+    let player = settings.media_player.unwrap_or(0);
+    let bank = match (settings.media_kind, settings.media_index) {
+        (Some(bank), _) => Some(bank),
+        (None, None) => Some(default_bank(state, player)),
+        (None, Some(_)) => bank_for_index(state, current_bank(state, player), index),
+    }?;
+    Some(media_source(bank, index))
+}
+
+/// Short label for the key face and encoder touch strip.
+///
+/// Falls back to the player number while the switcher is still reporting, and trims
+/// to what the touch strip shows.
+fn media_title(state: Option<&AtemState>, settings: &ActionSettings) -> String {
+    let player = settings.media_player.unwrap_or(0);
+    let Some(state) = state else {
+        return format!("Media {}", player + 1);
+    };
+    let Some(source) = requested_media_source(state, settings) else {
+        return format!("Media {}", player + 1);
+    };
+    let bank = match source {
+        MediaPlayerSourceID::Still(_) => MediaKind::Still,
+        MediaPlayerSourceID::VideoClip(_) => MediaKind::Clip,
+    };
+    let label = media_slot_label(Some(state), bank, media_source_index(source));
+    truncate_label(&label, TITLE_MAX_CHARS)
+}
+
+/// Clip to `max` characters, marking the cut with an ellipsis.
+fn truncate_label(label: &str, max: usize) -> String {
+    if label.chars().count() <= max {
+        return label.to_string();
+    }
+    let mut cut: String = label.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 fn dsk_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     let mut keys: Vec<u8> = state
         .map(|state| state.dsk_state.keys().copied().collect())
@@ -1230,6 +1647,168 @@ mod tests {
             port_type: port,
             availability3: 0,
         }
+    }
+
+    fn media_state(stills: &[(u8, bool, &str)]) -> AtemState {
+        let mut state = AtemState::default();
+        state.topology.media_players = 2;
+        state.media_player_capabilities.still_count = 8;
+        state.media_player_capabilities.clip_count = 4;
+        for (index, valid, name) in stills {
+            state.media_player_frame_descriptions.insert(
+                *index,
+                necromancer::protocol::atom::MediaPlayerFrameDescription {
+                    store_id: 0,
+                    index: u16::from(*index),
+                    is_valid: *valid,
+                    md5: [0; 16],
+                    name: (*name).to_string(),
+                },
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn still_slots_show_the_name_typed_on_the_switcher() {
+        let state = media_state(&[(0, true, "Lower Third"), (1, true, "  "), (2, false, "x")]);
+        assert_eq!(
+            media_slot_label(Some(&state), MediaKind::Still, 0),
+            "Lower Third"
+        );
+        // A valid frame with a blank name falls back to the slot number.
+        assert_eq!(
+            media_slot_label(Some(&state), MediaKind::Still, 1),
+            "Still 2"
+        );
+        // An invalid frame holds nothing to play.
+        assert_eq!(media_slot_label(Some(&state), MediaKind::Still, 2), "Empty");
+        // Slots the switcher never described keep the numbered label.
+        assert_eq!(
+            media_slot_label(Some(&state), MediaKind::Still, 5),
+            "Still 6"
+        );
+    }
+
+    #[test]
+    fn clips_have_no_name_on_the_wire() {
+        let state = media_state(&[]);
+        assert_eq!(media_slot_label(Some(&state), MediaKind::Clip, 0), "Clip 1");
+        assert_eq!(media_slot_label(None, MediaKind::Clip, 3), "Clip 4");
+    }
+
+    #[test]
+    fn media_title_prefers_the_still_name_and_falls_back_to_the_player() {
+        let state = media_state(&[(0, true, "Lower Third")]);
+        let settings = ActionSettings {
+            media_player: Some(1),
+            media_index: Some(0),
+            ..ActionSettings::default()
+        };
+        assert_eq!(media_title(Some(&state), &settings), "Lower Third");
+        assert_eq!(media_title(None, &settings), "Media 2");
+    }
+
+    #[test]
+    fn media_title_is_trimmed_for_the_touch_strip() {
+        let state = media_state(&[(0, true, "A very long still name here")]);
+        let settings = ActionSettings {
+            media_index: Some(0),
+            ..ActionSettings::default()
+        };
+        let title = media_title(Some(&state), &settings);
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
+        assert!(title.ends_with('…'));
+        assert_eq!(truncate_label("Short", TITLE_MAX_CHARS), "Short");
+    }
+
+    #[test]
+    fn dial_skips_empty_still_slots_and_wraps() {
+        // Slots 0 and 2 are loaded, 1 is empty, 3..7 were never described.
+        let state = media_state(&[
+            (0, true, "One"),
+            (1, false, "x"),
+            (2, true, "Two"),
+            (3, false, "x"),
+        ]);
+        assert_eq!(next_slot(&state, MediaKind::Still, 0, 1), Some(2));
+        assert_eq!(next_slot(&state, MediaKind::Still, 2, 1), Some(4));
+        assert_eq!(next_slot(&state, MediaKind::Still, 0, -1), Some(7));
+        // Nothing but the current slot is populated.
+        let only = media_state(&[(0, true, "One")]);
+        assert_eq!(next_slot(&only, MediaKind::Still, 0, 1), Some(1));
+    }
+
+    #[test]
+    fn every_clip_slot_is_playable() {
+        let state = media_state(&[]);
+        assert_eq!(next_slot(&state, MediaKind::Clip, 0, 1), Some(1));
+        assert_eq!(next_slot(&state, MediaKind::Clip, 0, -1), Some(3));
+    }
+
+    #[test]
+    fn requested_source_follows_the_configured_bank() {
+        let state = media_state(&[]);
+        let still = ActionSettings {
+            media_kind: Some(MediaKind::Still),
+            media_index: Some(3),
+            media_player: Some(1),
+            ..ActionSettings::default()
+        };
+        assert_eq!(
+            requested_media_source(&state, &still),
+            Some(MediaPlayerSourceID::Still(3))
+        );
+        let clip = ActionSettings {
+            media_kind: Some(MediaKind::Clip),
+            media_index: Some(2),
+            ..ActionSettings::default()
+        };
+        assert_eq!(
+            requested_media_source(&state, &clip),
+            Some(MediaPlayerSourceID::VideoClip(2))
+        );
+    }
+
+    #[test]
+    fn requested_source_without_a_bank_prefers_a_bank_that_holds_the_index() {
+        let mut state = media_state(&[]);
+        // Only stills exist, so a clip-sized index still lands in the still bank.
+        assert_eq!(
+            requested_media_source(
+                &state,
+                &ActionSettings {
+                    media_index: Some(5),
+                    ..ActionSettings::default()
+                }
+            ),
+            Some(MediaPlayerSourceID::Still(5))
+        );
+        // An untouched key starts on the first still.
+        assert_eq!(
+            requested_media_source(&state, &ActionSettings::default()),
+            Some(MediaPlayerSourceID::Still(0))
+        );
+        state.media_player_capabilities.still_count = 0;
+        assert_eq!(
+            requested_media_source(&state, &ActionSettings::default()),
+            Some(MediaPlayerSourceID::VideoClip(0))
+        );
+    }
+
+    #[test]
+    fn media_lists_follow_the_switcher_and_fall_back_when_disconnected() {
+        let view = media_view(None, MediaKind::Still);
+        assert_eq!(view.players.len(), 1);
+        assert_eq!(view.players[0].label, "Media Player 1");
+        assert_eq!(view.banks.len(), 2);
+        assert_eq!(view.slots.len(), 1);
+        let state = media_state(&[(0, true, "Lower Third")]);
+        let view = media_view(Some(&state), MediaKind::Still);
+        assert_eq!(view.players.len(), 2);
+        assert_eq!(view.slots.len(), 8);
+        assert_eq!(view.slots[0].label, "Lower Third");
+        assert_eq!(media_view(Some(&state), MediaKind::Clip).slots.len(), 4);
     }
 
     #[test]

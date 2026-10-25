@@ -20,6 +20,9 @@ The plugin exposes multiple dedicated Stream Deck actions (see `dev.miseinul.ate
 - `dev.miseinul.atem.previewinput` – ATEM Preview Input
 - `dev.miseinul.atem.cuttoblack` – ATEM Cut to Black
 - `dev.miseinul.atem.fadetoblack` – ATEM Fade to Black
+- `dev.miseinul.atem.auxoutput` – ATEM AUX Output (keypad + dial)
+- `dev.miseinul.atem.dskauto` / `dskonair` / `dskcut` / `dskfill` – downstream keyer
+- `dev.miseinul.atem.mediaplayer` – ATEM Media Player (keypad + dial)
 
 Every action shares `ActionSettings` in `src/contracts.rs`. Field names stay snake_case so existing profiles keep working:
 
@@ -29,6 +32,9 @@ Every action shares `ActionSettings` in `src/contracts.rs`. Field names stay sna
 - `aux_bus: Option<u8>` – AUX bus index.
 - `key: Option<u8>` – downstream keyer index.
 - `on_air: Option<bool>` – explicit DSK on-air target. `None` toggles.
+- `media_player: Option<u8>` – media player index, `0` being Media Player 1.
+- `media_index: Option<u8>` – slot inside the still or clip bank.
+- `media_kind: Option<MediaKind>` – `"still"` or `"clip"`. `None` follows the switcher.
 
 The same struct is exported to TypeScript. The inspector shows only the fields the current action UUID needs. Legacy string values from the old `<select>` controls still deserialize.
 
@@ -55,11 +61,12 @@ State updates still drive key images:
 - `PREVIEW_OR_PROGRAM_SOURCE` refreshes Program and/or Preview keys
 - `TRANSITION_POSITION` refreshes Auto keys
 - `DSK_STATE` refreshes DSK On Air and DSK Auto keys
+- `MEDIA_PLAYER_TOPOLOGY` (capabilities, frame descriptions, source) rebuilds the media lists and key titles. The switcher sends one `MPfe` per still after connecting, so the inspector would otherwise stay on a stale or empty list.
 
 Inspector messages use `type`:
 
 - plugin → inspector: `atemState` (`connected`, `detail`), `status` (`instances` with a tagged `status.kind`), and `options` (`kind`, `items`, `connected`, `detail`)
-- inspector → plugin: `ready`, `reconnect` (`id` optional), and `requestOptions` (`kind` is `me`, `video`, `aux`, `auxVideo`, or `dsk`)
+- inspector → plugin: `ready`, `reconnect` (`id` optional), and `requestOptions` (`kind` is `me`, `video`, `aux`, `auxVideo`, `dsk`, `mediaPlayer`, `mediaBank`, or `mediaIndex`)
 
 ### Mapping actions to ATEM commands
 
@@ -69,8 +76,23 @@ Inspector messages use `type`:
 - Program / Preview → `press_bus` (`set_program_input` / `set_preview_input`)
 - AUX → `press_aux` (`set_aux_source`); dial rotation calls `rotate_aux` and `ctx.update_settings`
 - DSK Auto / On Air / Cut / Fill → `press_dsk`
+- Media Player → `press_media` (`set_media_player_source`); dial rotation calls `rotate_media` and `ctx.update_settings`
 
 `video_source` IDs go through `VideoSource::from_u16`, falling back to `VideoSource::Unknown`. AUX and DSK show an alert when the IP is empty.
+
+### Media player
+
+`press_media` loads `media_index` from the `media_kind` bank, or from the bank the player already uses when `media_kind` is unset. The source is a `MediaPlayerSourceID::{Still, VideoClip}`. necromancer range-checks the player, the bank size, and the still's `is_valid` flag before sending, so an empty slot is refused by the library rather than by the switcher.
+
+Naming comes from the media pool state:
+
+- `media_player_frame_descriptions` carries the still name typed on the ATEM. Slots with `is_valid == false` are labelled `Empty`.
+- Clips have no name on the wire (`MPCS`/`RCPS` hold only index, status, frame counts and rate), so clip rows stay numbered. `MPfe` describes stills only.
+- `media_title` feeds `set_title`, which names the key and the encoder touch strip. It falls back to the player number before the switcher reports.
+
+`rotate_media` steps to the next or previous slot and skips still slots the switcher cannot play. It returns the settings to persist, so the key remembers where the dial landed.
+
+This action deliberately has no tally colour: unlike Program/Preview it names its source instead of showing which bus is live.
 
 ## Key colour behaviour
 

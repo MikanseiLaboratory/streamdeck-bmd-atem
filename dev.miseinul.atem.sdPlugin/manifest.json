@@ -8,7 +8,7 @@
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
   "Name": "ATEM Control",
-  "Version": "0.2.2.0",
+  "Version": "0.3.0.0",
   "UUID": "dev.miseinul.atem",
   "OS": [
     {
@@ -209,6 +209,30 @@
         }
       ],
       "Tooltip": "Set DSK fill source."
+    },
+    {
+      "UUID": "dev.miseinul.atem.mediaplayer",
+      "Icon": "Images/icon",
+      "Name": "Media Player",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Push": "Load media",
+          "Rotate": "Next / previous media",
+          "Touch": "Media player"
+        }
+      },
+      "States": [
+        {
+          "Image": "Images/icon",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "Tooltip": "Set the still image or clip a media player plays."
     }
   ],
   "PropertyInspectorPath": "ui/index.html"

@@ -6,6 +6,7 @@ import type {
   AtemStateMessage,
   GlobalSettings,
   InstanceConfig,
+  MediaKind,
   OptionsMessage,
   SelectItem,
   StatusMessage,
@@ -23,6 +24,9 @@ const EMPTY_SETTINGS: ActionSettings = {
   aux_bus: null,
   key: null,
   on_air: null,
+  media_player: null,
+  media_index: null,
+  media_kind: null,
 };
 
 const GLOBAL_DEFAULTS: GlobalSettings = {
@@ -35,7 +39,7 @@ const GLOBAL_DEFAULTS: GlobalSettings = {
 type Settings = ActionSettings & Record<string, unknown>;
 type Globals = GlobalSettings & Record<string, unknown>;
 type InspectorMessage = AtemStateMessage | OptionsMessage | StatusMessage;
-type NumberField = "me" | "video_source" | "aux_bus" | "key";
+type NumberField = "me" | "video_source" | "aux_bus" | "key" | "media_player" | "media_index";
 
 export function App() {
   const deck = useStreamDeck();
@@ -126,6 +130,15 @@ export function App() {
     }));
   };
 
+  // Switching bank reloads the slot list, so the old index no longer means anything.
+  const setMediaKind = (raw: string) => {
+    setSettings((previous) => ({
+      ...previous,
+      media_kind: raw === "" ? null : (raw as MediaKind),
+      media_index: null,
+    }));
+  };
+
   const fields = fieldsFor(action);
 
   const openConfig = () => {
@@ -197,6 +210,28 @@ export function App() {
           value={asText(settings.video_source)}
           onChange={(value) => setNumber("video_source", value)}
         />
+      )}
+      {fields.media && (
+        <>
+          <SelectField
+            label="Media player"
+            items={withCurrent(options.mediaPlayer, settings.media_player)}
+            value={asText(settings.media_player)}
+            onChange={(value) => setNumber("media_player", value)}
+          />
+          <SelectField
+            label="Bank"
+            items={options.mediaBank}
+            value={settings.media_kind ?? ""}
+            onChange={(value) => setMediaKind(value)}
+          />
+          <SelectField
+            label={settings.media_kind === "clip" ? "Clip" : "Still"}
+            items={withCurrent(options.mediaIndex, settings.media_index)}
+            value={asText(settings.media_index)}
+            onChange={(value) => setNumber("media_index", value)}
+          />
+        </>
       )}
       {fields.onAir && (
         <div className="sdpi-item">
@@ -386,6 +421,7 @@ function fieldsFor(action: string) {
     aux: action.endsWith(".auxoutput"),
     dsk: action.includes(".dsk"),
     onAir: action.endsWith(".dskonair"),
+    media: action.endsWith(".mediaplayer"),
   };
 }
 
@@ -396,6 +432,7 @@ function kindsFor(action: string): string[] {
   if (fields.aux) kinds.push("aux", "auxVideo");
   if (fields.dsk) kinds.push("dsk");
   if (fields.video && !fields.aux) kinds.push("video");
+  if (fields.media) kinds.push("mediaPlayer", "mediaBank", "mediaIndex");
   return kinds;
 }
 
