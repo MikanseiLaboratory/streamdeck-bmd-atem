@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use necromancer::protocol::atom::{InputProperties, MediaPlayerSourceID};
+use necromancer::protocol::atom::{
+    InputProperties, MeAvailability, MediaPlayerSourceID, SourceAvailability,
+};
 use necromancer::protocol::structs::{PortType, VideoSource};
 use necromancer::{AtemController, AtemState, StateUpdate};
 use num_traits::FromPrimitive;
@@ -40,6 +42,13 @@ const MEDIA_PLAYER_TOPOLOGY: StateUpdate = StateUpdate::from_bits_truncate(
         | StateUpdate::MEDIA_POOL_CLIP_DESCRIPTION.bits()
         | StateUpdate::MEDIA_PLAYER_SOURCE.bits(),
 );
+
+/// Offline mix-effect count for an ATEM Mini, which has a single M/E.
+/// A connected switcher uses `topology.mes` instead, and the value stays the protocol index.
+const OFFLINE_ME_COUNT: u8 = 1;
+
+/// Offline inputs for an ATEM Mini: four HDMI inputs.
+const OFFLINE_HDMI_INPUTS: u16 = 4;
 
 const ME_PROGRAM_PREVIEW: [(u16, &str); 8] = [
     (10010, "M/E 1 Program"),
@@ -211,14 +220,14 @@ impl AppState {
             "requestOptions" => {}
             _ => return,
         }
-        let mut settings = self
+        let (action, mut settings) = self
             .runtime
             .keys
             .read()
             .await
             .get(context)
-            .map(|record| record.settings.clone())
-            .unwrap_or_default();
+            .map(|record| (record.action.clone(), record.settings.clone()))
+            .unwrap_or_else(|| (String::new(), ActionSettings::default()));
         if let Some(ip) = command
             .atem_ip
             .as_ref()
@@ -230,6 +239,12 @@ impl AppState {
         if command.target.is_some() {
             settings.target = command.target.clone();
         }
+        if command.me.is_some() {
+            settings.me = command.me;
+        }
+        if command.aux_bus.is_some() {
+            settings.aux_bus = command.aux_bus;
+        }
         if self.runtime.inspectors.read().await.contains_key(context) {
             self.runtime
                 .inspectors
@@ -239,7 +254,10 @@ impl AppState {
         }
         self.runtime.ensure_legacy_instance(&settings).await;
         let (connected, detail) = self.runtime.connection_view(&settings).await;
-        let items = self.runtime.options(&command.kind, &settings).await;
+        let items = self
+            .runtime
+            .options(&action, &command.kind, &settings)
+            .await;
         self.runtime
             .send_pi(
                 context,
@@ -352,14 +370,14 @@ impl AppState {
         let targets = self.targets_for(context, settings, true).await;
         let first = targets.first()?;
         let state = first.controller.get_state().await;
-        let source_ids = aux_source_ids(&state);
+        let aux_bus = settings.aux_bus.unwrap_or(0);
+        let source_ids = aux_source_ids(&state, aux_bus);
         if source_ids.is_empty() {
             return None;
         }
         let current = settings.video_source.unwrap_or(1);
         let index = source_ids.iter().position(|id| *id == current).unwrap_or(0);
         let new_id = source_ids[cycle_index(source_ids.len(), index, ticks)];
-        let aux_bus = settings.aux_bus.unwrap_or(0);
         let source = video_source_from_id(new_id);
         let mut failed = false;
         for target in &targets {
@@ -628,7 +646,7 @@ impl AppState {
             .await;
         self.runtime.push_catalog_status().await;
         for kind in option_kinds(action) {
-            let items = self.runtime.options(kind, settings).await;
+            let items = self.runtime.options(action, kind, settings).await;
             self.runtime
                 .send_pi(
                     context,
@@ -950,7 +968,7 @@ impl Runtime {
         };
         for (context, action, settings) in open {
             for kind in option_kinds(&action) {
-                let items = self.options(kind, &settings).await;
+                let items = self.options(&action, kind, &settings).await;
                 self.send_pi(&context, &OptionsMessage::new(*kind, items, true, detail))
                     .await;
             }
@@ -1112,7 +1130,12 @@ impl Runtime {
             .collect()
     }
 
-    async fn options(&self, kind: &str, settings: &ActionSettings) -> Vec<SelectItem> {
+    async fn options(
+        &self,
+        action: &str,
+        kind: &str,
+        settings: &ActionSettings,
+    ) -> Vec<SelectItem> {
         let global = self.global.read().await.clone();
         let ids = resolve_targets(&global.instances, &global.groups, settings);
         let mut controller = None;
@@ -1131,9 +1154,10 @@ impl Runtime {
         };
         match kind {
             "me" => me_items(state_ref),
-            "video" => video_items(state_ref),
+            "video" if is_dsk_source_action(action) => dsk_source_items(state_ref),
+            "video" => program_preview_items(state_ref, settings.me.unwrap_or(0)),
             "aux" => aux_items(state_ref),
-            "auxVideo" => aux_video_items(state_ref),
+            "auxVideo" => aux_video_items(state_ref, settings.aux_bus.unwrap_or(0)),
             "dsk" => dsk_items(state_ref),
             "mediaPlayer" | "mediaBank" | "mediaIndex" => {
                 let bank = settings
@@ -1275,7 +1299,7 @@ fn me_items(state: Option<&AtemState>) -> Vec<SelectItem> {
     let count = state
         .map(|state| state.topology.mes)
         .filter(|count| *count > 0)
-        .unwrap_or(4);
+        .unwrap_or(OFFLINE_ME_COUNT);
     (0..count)
         .map(|me| SelectItem {
             label: format!("M/E {}", me + 1),
@@ -1284,19 +1308,58 @@ fn me_items(state: Option<&AtemState>) -> Vec<SelectItem> {
         .collect()
 }
 
-fn video_items(state: Option<&AtemState>) -> Vec<SelectItem> {
+/// Which bus a connected source list is being built for.
+#[derive(Clone, Copy)]
+enum SourceQuery {
+    /// Program or preview on one mix effect. `me` is the protocol index (0 = M/E 1).
+    MixEffect(u8),
+    /// Downstream keyer fill or cut.
+    KeySource,
+    /// One auxiliary bus. `bus` is the protocol index (0 = the first aux).
+    Auxiliary(u8),
+}
+
+fn is_dsk_source_action(action: &str) -> bool {
+    matches!(
+        action,
+        "dev.miseinul.atem.dskcut" | "dev.miseinul.atem.dskfill"
+    )
+}
+
+fn program_preview_items(state: Option<&AtemState>, me: u8) -> Vec<SelectItem> {
+    routed_items(state, SourceQuery::MixEffect(me), fallback_video_items)
+}
+
+fn dsk_source_items(state: Option<&AtemState>) -> Vec<SelectItem> {
+    routed_items(state, SourceQuery::KeySource, fallback_video_items)
+}
+
+fn routed_items(
+    state: Option<&AtemState>,
+    query: SourceQuery,
+    fallback: fn() -> Vec<SelectItem>,
+) -> Vec<SelectItem> {
     let Some(state) = state.filter(|state| !state.input_properties.is_empty()) else {
-        return fallback_video_items();
+        return fallback();
     };
-    listed_sources(&state.input_properties)
+    listed_sources(&state.input_properties, |source, properties| {
+        let Some(source_bits) = state.get_source_availability(*source) else {
+            return false;
+        };
+        let Some(me_bits) = state.get_me_availability(*source) else {
+            return false;
+        };
+        include_source(properties.port_type, source_bits, me_bits, query)
+    })
 }
 
 fn listed_sources<'a>(
     properties: impl IntoIterator<Item = (&'a VideoSource, &'a InputProperties)>,
+    include: impl Fn(&VideoSource, &InputProperties) -> bool,
 ) -> Vec<SelectItem> {
     let mut rows: Vec<(u16, String)> = properties
         .into_iter()
-        .filter(|(_, properties)| selectable_port(properties.port_type))
+        .filter(|(source, properties)| include(source, properties))
         .map(|(source, properties)| {
             let id = *source as u16;
             (id, source_label(id, properties))
@@ -1311,6 +1374,63 @@ fn listed_sources<'a>(
         .collect()
 }
 
+fn include_source(
+    port: PortType,
+    source_bits: SourceAvailability,
+    me_bits: MeAvailability,
+    query: SourceQuery,
+) -> bool {
+    let port_ok = match query {
+        SourceQuery::Auxiliary(_) => aux_routable_port(port),
+        SourceQuery::MixEffect(_) | SourceQuery::KeySource => selectable_port(port),
+    };
+    if !port_ok {
+        return false;
+    }
+    match query {
+        SourceQuery::MixEffect(me) => on_selected_me(me_bits, me),
+        SourceQuery::KeySource => source_bits.key_source(),
+        SourceQuery::Auxiliary(bus) => on_selected_aux(source_bits, bus),
+    }
+}
+
+/// `me` is the 0-based mix-effect index stored on the action.
+fn on_selected_me(availability: MeAvailability, me: u8) -> bool {
+    match me {
+        0 => availability.me1(),
+        1 => availability.me2(),
+        2 => availability.me3(),
+        3 => availability.me4(),
+        _ => false,
+    }
+}
+
+/// Auxiliary routing from `SourceAvailability`.
+///
+/// The `auxiliary` flag means any aux bus. `auxiliary1` and `auxiliary2` are
+/// per-output masks on some models (necromancer: Aux 1 / Aux 2, LibAtem
+/// `Aux1Output` / `Aux2Output`). Those product names are 1-based, so they match
+/// protocol bus 0 and bus 1.
+fn on_selected_aux(availability: SourceAvailability, aux_bus: u8) -> bool {
+    if availability.auxiliary() {
+        return true;
+    }
+    match aux_bus {
+        0 => availability.auxiliary1(),
+        1 => availability.auxiliary2(),
+        _ => false,
+    }
+}
+
+/// Sources available on an ATEM Mini when no switcher state has arrived.
+///
+/// Values are necromancer `VideoSource` discriminants, which are the protocol IDs a
+/// connected switcher reports in `input_properties`:
+/// Black 0, HDMI inputs 1–4, colour bars 1000, colour generators 2001 and 2002,
+/// media player 1 fill 3010 and its key output 3011.
+/// The Mini input table exposes that key as its own routable source
+/// (`PortType::MediaPlayerKey`). The Mini has no SuperSource; a connected
+/// switcher that does have one still lists it from `input_properties`.
 fn fallback_video_items() -> Vec<SelectItem> {
     let mut items = vec![
         SelectItem {
@@ -1330,17 +1450,25 @@ fn fallback_video_items() -> Vec<SelectItem> {
             value: (VideoSource::Colour2 as u16).to_string(),
         },
         SelectItem {
-            label: "SuperSource".into(),
-            value: (VideoSource::SuperSource as u16).to_string(),
+            label: "Media Player 1".into(),
+            value: (VideoSource::MediaPlayer1 as u16).to_string(),
+        },
+        SelectItem {
+            label: "Media Player 1 Key".into(),
+            value: (VideoSource::MediaPlayer1Key as u16).to_string(),
         },
     ];
-    items.extend((1..=20).map(|id| SelectItem {
+    items.extend((1..=OFFLINE_HDMI_INPUTS).map(|id| SelectItem {
         label: format!("Input {id}"),
         value: id.to_string(),
     }));
     items
 }
 
+/// Ports that can be placed on program, preview, or a downstream keyer.
+///
+/// A connected list also requires the matching availability bits. Auxiliary
+/// menus add direct, mix-effect, and multiview outputs on top of this set.
 fn selectable_port(port: PortType) -> bool {
     matches!(
         port,
@@ -1348,8 +1476,22 @@ fn selectable_port(port: PortType) -> bool {
             | PortType::Black
             | PortType::ColourBars
             | PortType::ColourGenerator
+            | PortType::MediaPlayerFill
+            | PortType::MediaPlayerKey
             | PortType::SuperSource
     )
+}
+
+/// Ports an auxiliary bus can select, before the availability check.
+///
+/// Direct inputs, mix-effect outputs, and multiview outputs are aux sources on
+/// the models that report them. Masks, aux outputs, and the audio monitor stay out.
+fn aux_routable_port(port: PortType) -> bool {
+    selectable_port(port)
+        || matches!(
+            port,
+            PortType::ExternalDirect | PortType::MEOutput | PortType::Multiview
+        )
 }
 
 fn source_label(id: u16, properties: &InputProperties) -> String {
@@ -1374,7 +1516,18 @@ fn fallback_source_label(id: u16) -> String {
         Some(VideoSource::Colour6) => "Color 6".into(),
         Some(VideoSource::Colour7) => "Color 7".into(),
         Some(VideoSource::Colour8) => "Color 8".into(),
+        Some(VideoSource::MediaPlayer1) => "Media Player 1".into(),
+        Some(VideoSource::MediaPlayer1Key) => "Media Player 1 Key".into(),
+        Some(VideoSource::MediaPlayer2) => "Media Player 2".into(),
+        Some(VideoSource::MediaPlayer2Key) => "Media Player 2 Key".into(),
+        Some(VideoSource::MediaPlayer3) => "Media Player 3".into(),
+        Some(VideoSource::MediaPlayer3Key) => "Media Player 3 Key".into(),
+        Some(VideoSource::MediaPlayer4) => "Media Player 4".into(),
+        Some(VideoSource::MediaPlayer4Key) => "Media Player 4 Key".into(),
         Some(VideoSource::SuperSource) => "SuperSource".into(),
+        Some(VideoSource::Input1Direct) => "Input 1 Direct".into(),
+        Some(VideoSource::ME1Prog) => "M/E 1 Program".into(),
+        Some(VideoSource::ME1Prev) => "M/E 1 Preview".into(),
         _ => format!("Input {id}"),
     }
 }
@@ -1384,7 +1537,8 @@ fn source_rank(id: u16) -> u32 {
         0 => 0,
         1000 => 1,
         2001..=2008 => 10 + u32::from(id - 2000),
-        6000 => 20,
+        3010..=3041 => 30 + u32::from(id - 3010),
+        6000 => 80,
         1..=40 => 100 + u32::from(id),
         _ => 10_000 + u32::from(id),
     }
@@ -1403,18 +1557,41 @@ fn aux_items(state: Option<&AtemState>) -> Vec<SelectItem> {
         .collect()
 }
 
-fn aux_video_items(state: Option<&AtemState>) -> Vec<SelectItem> {
-    let mut items = video_items(state);
-    let me_count = state.map(|state| state.topology.mes as usize).unwrap_or(2);
-    for (value, label) in ME_PROGRAM_PREVIEW.iter().take(me_count.saturating_mul(2)) {
-        items.push(SelectItem {
-            label: (*label).to_string(),
-            value: value.to_string(),
-        });
-    }
-    if items.is_empty() {
-        items = video_items(None);
-    }
+fn aux_video_items(state: Option<&AtemState>, aux_bus: u8) -> Vec<SelectItem> {
+    routed_items(
+        state,
+        SourceQuery::Auxiliary(aux_bus),
+        fallback_aux_video_items,
+    )
+}
+
+/// Offline AUX sources for an ATEM Mini HDMI output.
+///
+/// The Mini/Mini Pro input table and the ATEM Mini product description allow
+/// that output to clean-switch the HDMI inputs, direct-switch input 1, or show
+/// program and preview. Media players, black, colour bars, and colour
+/// generators are inputs on the Mini, and they are not in that output list.
+/// Multiview is called out as a Mini Pro output, so the Mini baseline omits it.
+fn fallback_aux_video_items() -> Vec<SelectItem> {
+    let mut items: Vec<SelectItem> = (1..=OFFLINE_HDMI_INPUTS)
+        .map(|id| SelectItem {
+            label: format!("Input {id}"),
+            value: id.to_string(),
+        })
+        .collect();
+    items.push(SelectItem {
+        label: "Input 1 Direct".into(),
+        value: (VideoSource::Input1Direct as u16).to_string(),
+    });
+    items.extend(
+        ME_PROGRAM_PREVIEW
+            .iter()
+            .take(2)
+            .map(|(value, label)| SelectItem {
+                label: (*label).to_string(),
+                value: value.to_string(),
+            }),
+    );
     items
 }
 
@@ -1611,38 +1788,24 @@ fn dsk_items(state: Option<&AtemState>) -> Vec<SelectItem> {
         .collect()
 }
 
-fn input_ids(state: Option<&AtemState>) -> Vec<u16> {
-    video_items(state)
+fn aux_source_ids(state: &AtemState, aux_bus: u8) -> Vec<u16> {
+    aux_video_items(Some(state), aux_bus)
         .into_iter()
         .filter_map(|item| item.value.parse().ok())
         .collect()
-}
-
-fn aux_source_ids(state: &AtemState) -> Vec<u16> {
-    let mut ids = input_ids(Some(state));
-    let me_count = state.topology.mes as usize;
-    ids.extend(
-        ME_PROGRAM_PREVIEW
-            .iter()
-            .take(me_count.saturating_mul(2))
-            .map(|(id, _)| *id),
-    );
-    if ids.is_empty() {
-        ids = (1..=20).collect();
-        ids.extend([10010, 10011, 10020, 10021]);
-    }
-    ids
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use necromancer::protocol::atom::{MeAvailability, SourceAvailability};
     use necromancer::protocol::structs::ExternalPortType;
 
     use super::*;
 
-    fn properties(port: PortType, name: &str) -> InputProperties {
+    /// High byte is `SourceAvailability`, low byte is `MeAvailability`.
+    fn properties(port: PortType, name: &str, source_bits: u8, me_bits: u8) -> InputProperties {
         let mut long_name = [0u8; 20];
         let bytes = name.as_bytes();
         long_name[..bytes.len()].copy_from_slice(bytes);
@@ -1654,7 +1817,7 @@ mod tests {
             available_external_port_types: ExternalPortType::default(),
             external_port_type: ExternalPortType::default(),
             port_type: port,
-            availability3: 0,
+            availability3: (u16::from(source_bits) << 8) | u16::from(me_bits),
         }
     }
 
@@ -1878,69 +2041,253 @@ mod tests {
         assert_eq!(view.slots[0].label, "intro.mov");
     }
 
+    fn values_for(
+        properties: &HashMap<VideoSource, InputProperties>,
+        query: SourceQuery,
+    ) -> Vec<String> {
+        listed_sources(properties, |_source, properties| {
+            include_source(
+                properties.port_type,
+                properties.source_availability(),
+                properties.me_availability(),
+                query,
+            )
+        })
+        .into_iter()
+        .map(|item| item.value)
+        .collect()
+    }
+
     #[test]
     fn me_labels_start_at_one_and_keep_the_protocol_index() {
         let items = me_items(None);
-        assert_eq!(items[0].label, "M/E 1");
-        assert_eq!(items[0].value, "0");
-        assert_eq!(items[1].label, "M/E 2");
-        assert_eq!(items[1].value, "1");
-        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items,
+            vec![SelectItem {
+                label: "M/E 1".into(),
+                value: "0".into(),
+            }]
+        );
     }
 
     #[test]
-    fn disconnected_aux_sources_include_inputs() {
-        let items = aux_video_items(None);
-        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert!(values.contains(&"0"), "Black");
-        assert!(values.contains(&"1"), "Input 1");
-        assert!(values.contains(&"1000"), "Color Bars");
-        assert!(values.contains(&"10010"), "M/E 1 Program");
-        assert!(values.contains(&"10011"), "M/E 1 Preview");
+    fn disconnected_aux_sources_follow_the_mini_output() {
+        let items = aux_video_items(None, 0);
+        let pairs: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| (item.label.as_str(), item.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Input 1", "1"),
+                ("Input 2", "2"),
+                ("Input 3", "3"),
+                ("Input 4", "4"),
+                ("Input 1 Direct", "11001"),
+                ("M/E 1 Program", "10010"),
+                ("M/E 1 Preview", "10011"),
+            ]
+        );
+        assert_eq!(aux_video_items(None, 1), items);
+        assert_eq!(VideoSource::Input1Direct as u16, 11001);
     }
 
     #[test]
-    fn disconnected_source_list_includes_black_and_color() {
-        let items = video_items(None);
-        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert!(values.contains(&"0"), "Black");
-        assert!(values.contains(&"1000"), "Color Bars");
-        assert!(values.contains(&"2001"), "Color 1");
-        assert!(values.contains(&"2002"), "Color 2");
-        assert!(values.contains(&"6000"), "SuperSource");
-        assert!(values.contains(&"1"));
-        assert_eq!(items[0].label, "Black");
-        assert_eq!(items[1].label, "Color Bars");
+    fn disconnected_source_list_matches_atem_mini_ids() {
+        let items = program_preview_items(None, 0);
+        assert_eq!(program_preview_items(None, 1), items);
+        let pairs: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| (item.label.as_str(), item.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Black", "0"),
+                ("Color Bars", "1000"),
+                ("Color 1", "2001"),
+                ("Color 2", "2002"),
+                ("Media Player 1", "3010"),
+                ("Media Player 1 Key", "3011"),
+                ("Input 1", "1"),
+                ("Input 2", "2"),
+                ("Input 3", "3"),
+                ("Input 4", "4"),
+            ]
+        );
+        assert_eq!(VideoSource::MediaPlayer1 as u16, 3010);
+        assert_eq!(VideoSource::MediaPlayer1Key as u16, 3011);
+        assert_eq!(VideoSource::Input1 as u16, 1);
+        assert_eq!(VideoSource::Input4 as u16, 4);
     }
 
     #[test]
-    fn connected_source_list_uses_switcher_names_and_skips_other_ports() {
+    fn availability_bit_positions_match_the_protocol_bytes() {
+        assert_eq!(
+            u8::from(SourceAvailability::new().with_auxiliary(true)),
+            1 << 0
+        );
+        assert_eq!(
+            u8::from(SourceAvailability::new().with_key_source(true)),
+            1 << 4
+        );
+        assert_eq!(
+            u8::from(SourceAvailability::new().with_auxiliary1(true)),
+            1 << 5
+        );
+        assert_eq!(
+            u8::from(SourceAvailability::new().with_auxiliary2(true)),
+            1 << 6
+        );
+        assert_eq!(u8::from(MeAvailability::new().with_me1(true)), 1 << 0);
+        assert_eq!(u8::from(MeAvailability::new().with_me2(true)), 1 << 1);
+        assert_eq!(u8::from(MeAvailability::new().with_me3(true)), 1 << 2);
+        assert_eq!(u8::from(MeAvailability::new().with_me4(true)), 1 << 3);
+    }
+
+    #[test]
+    fn connected_sources_follow_reported_availability_and_port_type() {
+        const AUX: u8 = 1 << 0;
+        const KEY: u8 = 1 << 4;
+        const AUX1: u8 = 1 << 5;
+        const AUX2: u8 = 1 << 6;
+        const ME1: u8 = 1 << 0;
+        const ME2: u8 = 1 << 1;
+
         let mut input_properties = HashMap::new();
-        input_properties.insert(VideoSource::Input3, properties(PortType::External, "Cam 3"));
-        input_properties.insert(VideoSource::Black, properties(PortType::Black, "Black"));
+        input_properties.insert(
+            VideoSource::Black,
+            properties(PortType::Black, "Black", KEY, ME1),
+        );
         input_properties.insert(
             VideoSource::ColourBars,
-            properties(PortType::ColourBars, "Color Bars"),
+            properties(PortType::ColourBars, "Color Bars", KEY, ME1),
         );
         input_properties.insert(
             VideoSource::Colour1,
-            properties(PortType::ColourGenerator, "Color 1"),
+            properties(PortType::ColourGenerator, "Color 1", 0, ME1),
         );
         input_properties.insert(
             VideoSource::MediaPlayer1,
-            properties(PortType::MediaPlayerFill, "Media 1"),
+            properties(PortType::MediaPlayerFill, "Media 1", 0, ME1),
+        );
+        input_properties.insert(
+            VideoSource::MediaPlayer1Key,
+            properties(PortType::MediaPlayerKey, "Media 1 Key", KEY, ME1),
+        );
+        input_properties.insert(
+            VideoSource::MediaPlayer2,
+            properties(PortType::MediaPlayerFill, "Media 2", AUX, ME1 | ME2),
         );
         input_properties.insert(
             VideoSource::SuperSource,
-            properties(PortType::SuperSource, "SuperSource"),
+            properties(PortType::SuperSource, "SuperSource", 0, ME2),
         );
-        let items = listed_sources(&input_properties);
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        input_properties.insert(
+            VideoSource::Input3,
+            properties(PortType::External, "Cam 3", AUX | KEY, ME1),
+        );
+        input_properties.insert(
+            VideoSource::Input4,
+            properties(PortType::External, "Cam 4", AUX1, ME2),
+        );
+        input_properties.insert(
+            VideoSource::Input5,
+            properties(PortType::External, "Cam 5", AUX2, ME1),
+        );
+        input_properties.insert(
+            VideoSource::Input1Direct,
+            properties(PortType::ExternalDirect, "Input 1 Direct", AUX, 0),
+        );
+        input_properties.insert(
+            VideoSource::ME1Prog,
+            properties(PortType::MEOutput, "Program", AUX, 0),
+        );
+        input_properties.insert(
+            VideoSource::Auxilary1,
+            properties(PortType::Auxiliary, "Output", AUX | KEY, ME1),
+        );
+
+        let me1 = listed_sources(&input_properties, |_source, properties| {
+            include_source(
+                properties.port_type,
+                properties.source_availability(),
+                properties.me_availability(),
+                SourceQuery::MixEffect(0),
+            )
+        });
+        let labels: Vec<&str> = me1.iter().map(|item| item.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Black", "Color Bars", "Color 1", "SuperSource", "Cam 3"]
+            vec![
+                "Black",
+                "Color Bars",
+                "Color 1",
+                "Media 1",
+                "Media 1 Key",
+                "Media 2",
+                "Cam 3",
+                "Cam 5",
+            ]
         );
-        assert_eq!(items[4].value, "3");
-        assert_eq!(items[3].value, "6000");
+        assert_eq!(me1[3].value, "3010");
+        assert_eq!(me1[4].value, "3011");
+
+        let me2 = values_for(&input_properties, SourceQuery::MixEffect(1));
+        assert_eq!(
+            me2,
+            vec!["3020".to_string(), "6000".to_string(), "4".to_string()]
+        );
+
+        let dsk = values_for(&input_properties, SourceQuery::KeySource);
+        assert_eq!(
+            dsk,
+            vec![
+                "0".to_string(),
+                "1000".to_string(),
+                "3011".to_string(),
+                "3".to_string(),
+            ]
+        );
+
+        let aux0 = values_for(&input_properties, SourceQuery::Auxiliary(0));
+        assert_eq!(
+            aux0,
+            vec![
+                "3020".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "10010".to_string(),
+                "11001".to_string(),
+            ]
+        );
+        let aux1 = values_for(&input_properties, SourceQuery::Auxiliary(1));
+        assert_eq!(
+            aux1,
+            vec![
+                "3020".to_string(),
+                "3".to_string(),
+                "5".to_string(),
+                "10010".to_string(),
+                "11001".to_string(),
+            ]
+        );
+        let aux2 = values_for(&input_properties, SourceQuery::Auxiliary(2));
+        assert_eq!(
+            aux2,
+            vec![
+                "3020".to_string(),
+                "3".to_string(),
+                "10010".to_string(),
+                "11001".to_string(),
+            ]
+        );
+
+        let sample = input_properties.get(&VideoSource::Input3).unwrap();
+        assert!(sample.source_availability().auxiliary());
+        assert!(sample.source_availability().key_source());
+        assert!(sample.me_availability().me1());
+        assert!(!sample.me_availability().me2());
     }
 }

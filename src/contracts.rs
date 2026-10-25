@@ -90,8 +90,8 @@ pub struct OptionsMessage {
 
 /// `sendToPlugin` payload from the inspector.
 ///
-/// `atem_ip` is included because the inspector debounces `setSettings`, so a list
-/// request can carry a newer address than the action has stored.
+/// `atem_ip`, `me`, and `aux_bus` are included because the inspector debounces
+/// `setSettings`, so a list request can be ahead of the stored action settings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 pub struct InspectorCommand {
     #[serde(default, rename = "type")]
@@ -102,6 +102,10 @@ pub struct InspectorCommand {
     pub atem_ip: Option<String>,
     #[serde(default)]
     pub target: Option<TargetSelector>,
+    #[serde(default)]
+    pub me: Option<u8>,
+    #[serde(default)]
+    pub aux_bus: Option<u8>,
     #[serde(default)]
     pub id: Option<String>,
 }

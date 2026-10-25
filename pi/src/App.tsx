@@ -110,11 +110,18 @@ export function App() {
     const selected = JSON.parse(targetKey) as TargetSelector;
     const timer = window.setTimeout(() => {
       for (const kind of kindsFor(action)) {
-        sendToPlugin({ type: "requestOptions", kind, atem_ip: settings.atem_ip, target: selected });
+        sendToPlugin({
+          type: "requestOptions",
+          kind,
+          atem_ip: settings.atem_ip,
+          target: selected,
+          me: settings.me,
+          aux_bus: settings.aux_bus,
+        });
       }
     }, 200);
     return () => window.clearTimeout(timer);
-  }, [action, sendToPlugin, settings.atem_ip, targetKey]);
+  }, [action, sendToPlugin, settings.atem_ip, settings.me, settings.aux_bus, targetKey]);
 
   const setNumber = (field: NumberField, raw: string) => {
     setSettings((previous) => ({
