@@ -31,7 +31,7 @@ cd pi && npm install && npm run build
 7. For Program/Preview actions, key colours follow the ATEM:
    - Program Input keys: active input = red, inactive = gray.
    - Preview Input keys: active input = green, inactive = gray.
-8. **Media Player** actions set what a media player plays. Pick the player, the bank (**Still** or **Clip**), and the slot. Still slots are labelled with the name typed on the ATEM and update as soon as the switcher reports them; clips have no name in the protocol, so they stay numbered. The key and the encoder touch strip show the current slot name. Turning the dial steps to the next or previous still (or clip), skipping empty still slots, and pressing loads the configured slot.
+8. **Media Player** actions set what a media player plays. Pick the player, the bank (**Still** or **Clip**), and the slot. Both still and clip slots are labelled with the name typed on the ATEM and update as soon as the switcher reports them. The key and the encoder touch strip show the current slot name. Turning the dial steps to the next or previous still (or clip), skipping unused slots, and pressing loads the configured slot.
    - Stream Deck clips the encoder touch strip at about 16 characters. Long still names are shortened with `…`.
 
 ## License

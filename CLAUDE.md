@@ -4,7 +4,7 @@
 
 Key characteristics:
 
-- Uses [`necromancer`](https://github.com/MikanseiLaboratory/necromancer) (`feat/streamdeck` @ `aee784e7`) for ATEM protocol and state management. That commit accepts protocol 2.30–2.32. The protocol crate is not vendored.
+- Uses [`necromancer`](https://github.com/MikanseiLaboratory/necromancer) (`feat/streamdeck` @ `c4cfb3c8`) for ATEM protocol and state management. That commit accepts protocol 2.30–2.32 and decodes `MPCS` clip descriptions. The protocol crate is not vendored.
 - Uses [`StreamDeckPluginRust`](https://github.com/MikanseiLaboratory/StreamDeckPluginRust) (`streamdeck-plugin`) for the Stream Deck WebSocket host, action registry, and TypeScript contract export.
 - The Property Inspector is a React app in `pi/`, built with [`@mikanseilaboratory/streamdeck-pi-client`](https://github.com/MikanseiLaboratory/streamdeck-pi-client). `cargo run --bin typegen` writes `pi/src/generated/contracts.ts`. Vite emits `dev.miseinul.atem.sdPlugin/ui/`.
 - Keeps one supervised ATEM session per catalog entry (`src/pool.rs`). Instances and groups are edited in a separate configuration window, the same way as the HyperDeck, vMix, and OBS plugins. Each entry is Disabled, Connecting, Connected, or Disconnected with a message.
@@ -61,7 +61,7 @@ State updates still drive key images:
 - `PREVIEW_OR_PROGRAM_SOURCE` refreshes Program and/or Preview keys
 - `TRANSITION_POSITION` refreshes Auto keys
 - `DSK_STATE` refreshes DSK On Air and DSK Auto keys
-- `MEDIA_PLAYER_TOPOLOGY` (capabilities, frame descriptions, source) rebuilds the media lists and key titles. The switcher sends one `MPfe` per still after connecting, so the inspector would otherwise stay on a stale or empty list.
+- `MEDIA_PLAYER_TOPOLOGY` (capabilities, still and clip descriptions, source) rebuilds the media lists and key titles. The switcher sends one `MPfe` per still and one `MPCS` per clip after connecting, so the inspector would otherwise stay on a stale or empty list.
 
 Inspector messages use `type`:
 
@@ -87,10 +87,10 @@ Inspector messages use `type`:
 Naming comes from the media pool state:
 
 - `media_player_frame_descriptions` carries the still name typed on the ATEM. Slots with `is_valid == false` are labelled `Empty`.
-- Clips have no name on the wire (`MPCS`/`RCPS` hold only index, status, frame counts and rate), so clip rows stay numbered. `MPfe` describes stills only.
+- `media_pool_clip_descriptions` carries the clip name, decoded from `MPCS`. That atom is the only place the protocol sends a clip name: `MPfe` describes stills, and `RCPS` only reports playback state. Slots with `is_used == false` are labelled `Empty`. `MPCS` support comes from necromancer PR MikanseiLaboratory/necromancer#4.
 - `media_title` feeds `set_title`, which names the key and the encoder touch strip. It falls back to the player number before the switcher reports.
 
-`rotate_media` steps to the next or previous slot and skips still slots the switcher cannot play. It returns the settings to persist, so the key remembers where the dial landed.
+`rotate_media` steps to the next or previous slot and skips slots the switcher reports as unused. It returns the settings to persist, so the key remembers where the dial landed.
 
 This action deliberately has no tally colour: unlike Program/Preview it names its source instead of showing which bus is live.
 

@@ -37,6 +37,7 @@ const MEDIA_PLAYER_ACTION: &str = "dev.miseinul.atem.mediaplayer";
 const MEDIA_PLAYER_TOPOLOGY: StateUpdate = StateUpdate::from_bits_truncate(
     StateUpdate::MEDIA_PLAYER_CAPABILITIES.bits()
         | StateUpdate::MEDIA_PLAYER_FRAME_DESCRIPTION.bits()
+        | StateUpdate::MEDIA_POOL_CLIP_DESCRIPTION.bits()
         | StateUpdate::MEDIA_PLAYER_SOURCE.bits(),
 );
 
@@ -1472,7 +1473,10 @@ fn media_slot_playable(state: &AtemState, bank: MediaKind, index: u8) -> bool {
             .media_player_frame_descriptions
             .get(&index)
             .is_none_or(|frame| frame.is_valid),
-        MediaKind::Clip => true,
+        MediaKind::Clip => state
+            .media_pool_clip_descriptions
+            .get(&index)
+            .is_none_or(|clip| clip.is_used),
     }
 }
 
@@ -1495,8 +1499,9 @@ fn bank_for_index(state: &AtemState, preferred: Option<MediaKind>, index: u8) ->
 
 /// Label for one slot of a media bank.
 ///
-/// Stills carry the name typed on the ATEM; clips do not, so they fall back to the
-/// slot number. Empty still slots say so instead of showing a bare index.
+/// Both banks carry the name typed on the ATEM: stills in `MPfe`, clips in
+/// `MPCS`. Slots the switcher marks unused say so instead of showing a bare
+/// index, and slots it never described keep their number.
 fn media_slot_label(state: Option<&AtemState>, bank: MediaKind, index: u8) -> String {
     let fallback = match bank {
         MediaKind::Still => format!("Still {}", index + 1),
@@ -1505,20 +1510,24 @@ fn media_slot_label(state: Option<&AtemState>, bank: MediaKind, index: u8) -> St
     let Some(state) = state else {
         return fallback;
     };
-    match bank {
+    let (used, name) = match bank {
         MediaKind::Still => match state.media_player_frame_descriptions.get(&index) {
-            Some(frame) if frame.is_valid => {
-                let name = frame.name.trim();
-                if name.is_empty() {
-                    fallback
-                } else {
-                    name.to_string()
-                }
-            }
-            Some(_) => "Empty".to_string(),
-            None => fallback,
+            Some(frame) => (frame.is_valid, frame.name.as_str()),
+            None => return fallback,
         },
-        MediaKind::Clip => fallback,
+        MediaKind::Clip => match state.media_pool_clip_descriptions.get(&index) {
+            Some(clip) => (clip.is_used, clip.name.as_str()),
+            None => return fallback,
+        },
+    };
+    if !used {
+        return "Empty".to_string();
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        fallback
+    } else {
+        name.to_string()
     }
 }
 
@@ -1691,9 +1700,35 @@ mod tests {
     }
 
     #[test]
-    fn clips_have_no_name_on_the_wire() {
-        let state = media_state(&[]);
-        assert_eq!(media_slot_label(Some(&state), MediaKind::Clip, 0), "Clip 1");
+    fn clip_slots_show_the_name_from_the_media_pool() {
+        let mut state = media_state(&[]);
+        state.media_pool_clip_descriptions.insert(
+            0,
+            necromancer::protocol::atom::MediaPoolClipDescription {
+                index: 0,
+                is_used: true,
+                name: "intro.mov".to_string(),
+                frames: 900,
+            },
+        );
+        state.media_pool_clip_descriptions.insert(
+            1,
+            necromancer::protocol::atom::MediaPoolClipDescription {
+                index: 1,
+                is_used: false,
+                name: String::new(),
+                frames: 0,
+            },
+        );
+        assert_eq!(
+            media_slot_label(Some(&state), MediaKind::Clip, 0),
+            "intro.mov"
+        );
+        // A slot the switcher marks unused holds nothing to play.
+        assert_eq!(media_slot_label(Some(&state), MediaKind::Clip, 1), "Empty");
+        // Slots it never described keep the numbered label.
+        assert_eq!(media_slot_label(Some(&state), MediaKind::Clip, 3), "Clip 4");
+        // Without a switcher there is nothing to name but the slot.
         assert_eq!(media_slot_label(None, MediaKind::Clip, 3), "Clip 4");
     }
 
@@ -1740,8 +1775,28 @@ mod tests {
     }
 
     #[test]
-    fn every_clip_slot_is_playable() {
+    fn dial_skips_unused_clip_slots() {
+        let mut state = media_state(&[]);
+        // Slot 1 is unused, so the dial goes straight past it.
+        for (index, is_used) in [(0u8, true), (1, false), (2, true)] {
+            state.media_pool_clip_descriptions.insert(
+                index,
+                necromancer::protocol::atom::MediaPoolClipDescription {
+                    index,
+                    is_used,
+                    name: format!("clip{index}"),
+                    frames: 10,
+                },
+            );
+        }
+        assert_eq!(next_slot(&state, MediaKind::Clip, 0, 1), Some(2));
+        assert_eq!(next_slot(&state, MediaKind::Clip, 0, -1), Some(3));
+    }
+
+    #[test]
+    fn every_described_clip_slot_is_playable() {
         let state = media_state(&[]);
+        // Undescribed slots are assumed usable rather than skipped.
         assert_eq!(next_slot(&state, MediaKind::Clip, 0, 1), Some(1));
         assert_eq!(next_slot(&state, MediaKind::Clip, 0, -1), Some(3));
     }
@@ -1808,7 +1863,19 @@ mod tests {
         assert_eq!(view.players.len(), 2);
         assert_eq!(view.slots.len(), 8);
         assert_eq!(view.slots[0].label, "Lower Third");
-        assert_eq!(media_view(Some(&state), MediaKind::Clip).slots.len(), 4);
+        let mut state = state;
+        state.media_pool_clip_descriptions.insert(
+            0,
+            necromancer::protocol::atom::MediaPoolClipDescription {
+                index: 0,
+                is_used: true,
+                name: "intro.mov".to_string(),
+                frames: 900,
+            },
+        );
+        let view = media_view(Some(&state), MediaKind::Clip);
+        assert_eq!(view.slots.len(), 4);
+        assert_eq!(view.slots[0].label, "intro.mov");
     }
 
     #[test]
