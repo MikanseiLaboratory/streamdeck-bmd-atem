@@ -156,6 +156,12 @@ define_action!(
 );
 define_action!(DskCutAction, "dev.miseinul.atem.dskcut", press_dsk_cut);
 define_action!(DskFillAction, "dev.miseinul.atem.dskfill", press_dsk_fill);
+define_action!(
+    MediaPlayerAction,
+    "dev.miseinul.atem.mediaplayer",
+    press_media,
+    rotate_media
+);
 
 /// Keep action modules linked so `inventory` registrations are not stripped.
 pub fn force_link() {
@@ -170,6 +176,7 @@ pub fn force_link() {
     let _ = std::any::type_name::<DskOnAirAction>();
     let _ = std::any::type_name::<DskCutAction>();
     let _ = std::any::type_name::<DskFillAction>();
+    let _ = std::any::type_name::<MediaPlayerAction>();
 }
 
 async fn ignore_dial(
@@ -287,5 +294,30 @@ async fn press_dsk_fill(ctx: &ActionContext<'_, ActionSettings, AppState>) -> Re
     ctx.state()
         .press_dsk(&ctx.identity().context, &ctx.settings(), DskKind::Fill)
         .await;
+    Ok(())
+}
+
+async fn press_media(ctx: &ActionContext<'_, ActionSettings, AppState>) -> Result<()> {
+    ctx.state()
+        .press_media(&ctx.identity().context, &ctx.settings())
+        .await;
+    Ok(())
+}
+
+async fn rotate_media(
+    ctx: &ActionContext<'_, ActionSettings, AppState>,
+    payload: &DialRotatePayload,
+) -> Result<()> {
+    if let Some(updated) = ctx
+        .state()
+        .rotate_media(
+            &ctx.identity().context,
+            &ctx.settings(),
+            i64::from(payload.ticks),
+        )
+        .await
+    {
+        ctx.update_settings(|settings| *settings = updated)?;
+    }
     Ok(())
 }

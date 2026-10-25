@@ -20,6 +20,12 @@ pub struct ActionSettings {
     pub aux_bus: Option<u8>,
     pub key: Option<u8>,
     pub on_air: Option<bool>,
+    /// Mix-effect-free media player index, `0` being Media Player 1.
+    pub media_player: Option<u8>,
+    /// Index inside the still or clip bank the media player plays.
+    pub media_index: Option<u8>,
+    /// `"still"` or `"clip"`. `None` keeps the bank the player already uses.
+    pub media_kind: Option<MediaKind>,
 }
 
 impl<'de> Deserialize<'de> for ActionSettings {
@@ -39,8 +45,20 @@ impl<'de> Deserialize<'de> for ActionSettings {
             aux_bus: read_num(map.get("aux_bus")),
             key: read_num(map.get("key")),
             on_air: read_bool(map.get("on_air")),
+            media_player: read_num(map.get("media_player")),
+            media_index: read_num(map.get("media_index")),
+            media_kind: read_media_bank(map.get("media_kind")),
         })
     }
+}
+
+/// Media pool bank a media player can play from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum MediaKind {
+    Still,
+    Clip,
 }
 
 /// One row in a Property Inspector `<select>`.
@@ -199,6 +217,7 @@ pub struct StatusMessage {
 }
 
 export_ts!(ActionSettings);
+export_ts!(MediaKind);
 export_ts!(SelectItem);
 export_ts!(AtemStateMessage);
 export_ts!(OptionsMessage);
@@ -350,6 +369,14 @@ where
     }
 }
 
+fn read_media_bank(value: Option<&Value>) -> Option<MediaKind> {
+    match read_string(value)?.to_ascii_lowercase().as_str() {
+        "still" => Some(MediaKind::Still),
+        "clip" => Some(MediaKind::Clip),
+        _ => None,
+    }
+}
+
 fn read_bool(value: Option<&Value>) -> Option<bool> {
     match value {
         Some(Value::Bool(value)) => Some(*value),
@@ -391,6 +418,9 @@ mod tests {
                 aux_bus: Some(0),
                 key: Some(2),
                 on_air: Some(true),
+                media_player: None,
+                media_index: None,
+                media_kind: None,
             }
         );
         assert_eq!(normalized_ip(&settings).as_deref(), Some("192.168.1.10"));
@@ -401,6 +431,23 @@ mod tests {
         let settings: ActionSettings =
             serde_json::from_str(r#"{"atem_ip":"","me":"","on_air":""}"#).unwrap();
         assert_eq!(settings, ActionSettings::default());
+    }
+
+    #[test]
+    fn media_settings_accept_strings_and_bank_names() {
+        let settings: ActionSettings =
+            serde_json::from_str(r#"{"media_player":"1","media_index":2,"media_kind":"Clip"}"#)
+                .unwrap();
+        assert_eq!(settings.media_player, Some(1));
+        assert_eq!(settings.media_index, Some(2));
+        assert_eq!(settings.media_kind, Some(MediaKind::Clip));
+        let text = serde_json::to_string(&settings.media_kind).unwrap();
+        assert_eq!(text, "\"clip\"");
+
+        let unknown: ActionSettings =
+            serde_json::from_str(r#"{"media_kind":"mediapool","media_index":""}"#).unwrap();
+        assert_eq!(unknown.media_kind, None);
+        assert_eq!(unknown.media_index, None);
     }
 
     #[test]

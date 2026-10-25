@@ -22,5 +22,19 @@ export type AtemStateMessage = { type: string, connected: boolean, detail: strin
 
 export type SelectItem = { label: string, value: string, };
 
-export type ActionSettings = { atem_ip: string | null, target: TargetSelector | null, me: number | null, video_source: number | null, aux_bus: number | null, key: number | null, on_air: boolean | null, };
+export type MediaKind = "still" | "clip";
+
+export type ActionSettings = { atem_ip: string | null, target: TargetSelector | null, me: number | null, video_source: number | null, aux_bus: number | null, key: number | null, on_air: boolean | null, 
+/**
+ * Mix-effect-free media player index, `0` being Media Player 1.
+ */
+media_player: number | null, 
+/**
+ * Index inside the still or clip bank the media player plays.
+ */
+media_index: number | null, 
+/**
+ * `"still"` or `"clip"`. `None` keeps the bank the player already uses.
+ */
+media_kind: MediaKind | null, };
 
