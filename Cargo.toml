@@ -1,10 +1,11 @@
 [package]
 name = "streamdeck-atem"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Stream Deck plugin for Blackmagic ATEM control"
 license = "Apache-2.0"
+repository = "https://github.com/MikanseiLaboratory/streamdeck-bmd-atem"
 
 [lib]
 name = "streamdeck_atem"

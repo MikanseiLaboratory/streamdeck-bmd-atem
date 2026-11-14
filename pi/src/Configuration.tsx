@@ -71,7 +71,7 @@ export function Configuration() {
     return (
       <main>
         <header className="config-header">
-          <h1>ATEM [MikanseiLaboratory]</h1>
+          <h1>Blackmagic Design ATEM [MikanseiLaboratory]</h1>
         </header>
         <p className="empty-note">Open this window from a key's property inspector.</p>
       </main>
@@ -81,7 +81,7 @@ export function Configuration() {
   return (
     <main>
       <header className="config-header">
-        <h1>ATEM [MikanseiLaboratory]</h1>
+        <h1>Blackmagic Design ATEM [MikanseiLaboratory]</h1>
       </header>
       <div className="config-body">
         <div className="sdpi-heading">ATEM instances</div>
