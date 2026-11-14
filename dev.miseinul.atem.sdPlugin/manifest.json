@@ -8,7 +8,7 @@
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
   "Name": "Blackmagic Design ATEM [MikanseiLaboratory]",
-  "Version": "0.3.0.0",
+  "Version": "0.4.0.0",
   "UUID": "dev.miseinul.atem",
   "OS": [
     {
