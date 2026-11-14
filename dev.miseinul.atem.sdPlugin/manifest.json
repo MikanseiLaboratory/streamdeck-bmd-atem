@@ -7,7 +7,7 @@
   "CodePathWin": "streamdeck-atem.exe",
   "Description": "Control Blackmagic ATEM switchers from Stream Deck.",
   "Icon": "Images/icon",
-  "Name": "ATEM Control",
+  "Name": "Blackmagic Design ATEM [MikanseiLaboratory]",
   "Version": "0.3.0.0",
   "UUID": "dev.miseinul.atem",
   "OS": [
@@ -23,7 +23,7 @@
   "Software": {
     "MinimumVersion": "6.9"
   },
-  "Category": "ATEM Control",
+  "Category": "Blackmagic Design ATEM [MikanseiLaboratory]",
   "CategoryIcon": "Images/icon",
   "Profiles": [],
   "Actions": [
