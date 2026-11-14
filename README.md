@@ -1,4 +1,4 @@
-# streamdeck-atem-rs
+# ATEM Plugin for StreamDeck
 
 Cross-platform Stream Deck plugin for **Blackmagic ATEM** control. Built with Rust.
 

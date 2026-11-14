@@ -1,6 +1,6 @@
 ## Project overview
 
-`streamdeck-atem-rs` is a cross‑platform Stream Deck plugin, written in Rust, for controlling Blackmagic ATEM switchers.
+`streamdeck-bmd-atem` is a cross‑platform Stream Deck plugin, written in Rust, for controlling Blackmagic ATEM switchers.
 
 Key characteristics:
 
