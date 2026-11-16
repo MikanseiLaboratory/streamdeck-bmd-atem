@@ -116,3 +116,13 @@ jobs:
           body: ${{ (contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta')) && format('This is a beta release for {0}. It is intended for testing and may be unstable.', github.ref_name) || format('Stable release {0}.', github.ref_name) }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  announce-discord:
+    name: Announce release on Discord
+    needs: [pack]
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/discord-notify.yml
+    with:
+      tag: "${{ github.event.inputs.tag || github.ref_name }}"
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
